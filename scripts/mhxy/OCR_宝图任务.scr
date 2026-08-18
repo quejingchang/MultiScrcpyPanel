@@ -1,0 +1,11 @@
+OCR 导航_活动按钮.png MAXERR 0.2
+WAIT 2800
+OCR 日常_宝图任务.png MAXERR 0.3 TEXT "参加"
+WAIT 600
+LOOP 15
+  WAIT 3000
+  OCR 按钮_确定.png MAXERR 0.15
+  WAIT 600
+  OCR 按钮_使用.png MAXERR 0.15
+  WAIT 800
+ENDLOOP

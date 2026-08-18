@@ -1,0 +1,17 @@
+# 梦幻西游手游 · 平定安邦 — OCR 图像识别版
+# 流程为通用模板，请按真实截图微调。图标来自 csharp/templates/。
+OCR 导航_活动按钮.png
+WAIT 800
+OCR 标签_日常活动.png
+WAIT 500
+OCR 日常_平定安邦.png
+WAIT 600
+OCR 按钮_参加.png
+WAIT 1500
+LOOP 20
+  WAIT 3000
+  OCR 按钮_确定.png
+  WAIT 600
+  OCR 按钮_使用.png
+  WAIT 800
+ENDLOOP

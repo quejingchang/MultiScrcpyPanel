@@ -1,0 +1,16 @@
+# 梦幻西游手游 · 封妖（降妖除妖）— OCR 图像识别版
+# ⚠️ 暂无专属「封妖」图标，暂用最接近的「挑战_二十八星宿」占位。
+#    建议另裁一张「封妖」图标放入 csharp/templates/ 并替换下面第一行。
+OCR 挑战_二十八星宿.png
+WAIT 800
+OCR 标签_挑战活动.png
+WAIT 500
+OCR 按钮_参加.png
+WAIT 1500
+LOOP 15
+  WAIT 3000
+  OCR 按钮_确定.png
+  WAIT 600
+  OCR 按钮_进入.png
+  WAIT 800
+ENDLOOP

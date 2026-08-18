@@ -19,6 +19,6 @@ assets/*.jar
 .writetest
 *.log
 
-# ---- 本地游戏截图素材（不入库）----
-mhxy/
+# ---- 本地游戏截图素材（不入库；注意用 /mhxy/ 限定根目录，避免误伤 scripts/mhxy 脚本）----
+/mhxy/
 

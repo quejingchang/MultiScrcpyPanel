@@ -1,0 +1,17 @@
+# 梦幻西游手游 · 星宿（二十八星宿）— OCR 图像识别版
+# 流程为通用模板，请按真实截图微调。图标来自 csharp/templates/。
+OCR 导航_活动按钮.png
+WAIT 800
+OCR 标签_挑战活动.png
+WAIT 500
+OCR 挑战_二十八星宿.png
+WAIT 600
+OCR 按钮_参加.png
+WAIT 1500
+LOOP 10
+  WAIT 4000
+  OCR 按钮_确定.png
+  WAIT 600
+  OCR 按钮_进入.png
+  WAIT 800
+ENDLOOP

@@ -1,0 +1,19 @@
+# 梦幻西游手游 · 秘境降妖 — OCR 图像识别版
+# 流程为通用模板，请按真实截图微调。图标来自 csharp/templates/。
+OCR 导航_活动按钮.png
+WAIT 800
+OCR 标签_日常活动.png
+WAIT 500
+OCR 日常_秘境降妖.png
+WAIT 600
+OCR 按钮_参加.png
+WAIT 1500
+LOOP 10
+  WAIT 4000
+  OCR 秘境_标题.png
+  WAIT 400
+  OCR NPC_秘境降妖选项.png
+  WAIT 400
+  OCR 按钮_进入.png
+  WAIT 800
+ENDLOOP

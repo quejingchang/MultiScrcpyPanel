@@ -1,0 +1,6 @@
+OCR 导航_活动按钮.png MAXERR 0.15
+WAIT 800
+OCR 日常_师门任务.png MAXERR 0.15
+WAIT 600
+OCR 按钮_参加.png MAXERR 0.15
+WAIT 1500

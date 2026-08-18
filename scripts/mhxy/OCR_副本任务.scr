@@ -1,0 +1,16 @@
+# 梦幻西游手游 · 副本任务 — OCR 图像识别版
+# ⚠️ 暂无专属「副本」图标，暂用「秘境_标题 / 秘境_海底秘境」占位（副本多走秘境入口）。
+#    建议另裁一张「副本」图标放入 csharp/templates/ 并替换下面第一行。
+OCR 秘境_标题.png
+WAIT 800
+OCR 秘境_海底秘境.png
+WAIT 600
+OCR 按钮_进入.png
+WAIT 1500
+LOOP 10
+  WAIT 4000
+  OCR 按钮_确定.png
+  WAIT 600
+  OCR 按钮_使用.png
+  WAIT 800
+ENDLOOP
