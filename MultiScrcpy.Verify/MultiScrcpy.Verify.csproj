@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    运行时验证工程（headless 控制台）。
+
+    目的：实证架构文档 §6.1 / §6.3 / §6.4 三条**运行时**路径真实工作——
+      ① FFmpegBinariesHelper.Register() 能加载原生库；
+      ② H264Decoder 增量喂流 + config packet 前置合并真的出帧；
+      ③ FrameConverter（sws_scale YUV420P → BGR24）真的产出有效 GDI+ Bitmap。
+
+    分层约束：本工程只引用 MultiScrcpyPanel，**不直接触碰 socket / adb**，
+    也不新增任何协议实现——只是一个外部驱动器。
+
+    TFM 必须与被引用工程一致（net8.0-windows），UseWindowsForms=true
+    用于解析 System.Drawing（WindowsDesktop 框架引用），不启动消息循环。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>MultiScrcpy.Verify</RootNamespace>
+    <AssemblyName>MultiScrcpy.Verify</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Product>MultiScrcpyPanel 运行时验证</Product>
+    <AssemblyTitle>解码管线运行时验证</AssemblyTitle>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MultiScrcpyPanel\MultiScrcpyPanel.csproj" />
+  </ItemGroup>
+
+  <!-- FFmpeg 原生 DLL：平铺/嵌套两种布局都能铺平到输出 ffmpeg\x64\ -->
+  <ItemGroup>
+    <_FFmpegFlatProbe Include="..\native\ffmpeg\x64\*.dll" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'@(_FFmpegFlatProbe)' != ''">
+    <None Include="..\native\ffmpeg\x64\*.dll" Link="ffmpeg\x64\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'@(_FFmpegFlatProbe)' == ''">
+    <None Include="..\native\ffmpeg\x64\**\*.dll" Link="ffmpeg\x64\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- scrcpy-server jar：优先 csharp\assets\，其次仓库根 assets\ -->
+    <None Include="..\assets\*.jar" Link="assets\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="..\..\assets\*.jar" Link="assets\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>

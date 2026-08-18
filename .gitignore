@@ -1,0 +1,24 @@
+# ---- .NET 构建产物 ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ---- 运行期产物 ----
+logs/
+config/settings.json
+
+# ---- 外部二进制 / 第三方库（由 tools/ 脚本下载或构建，不入库）----
+native/
+opencv/
+assets/*.jar
+
+# ---- 本机同步 / 临时产物 / 日志（不入库）----
+.sync-conflict-backup/
+.writetest
+*.log
+
+# ---- 本地游戏截图素材（不入库）----
+mhxy/
+

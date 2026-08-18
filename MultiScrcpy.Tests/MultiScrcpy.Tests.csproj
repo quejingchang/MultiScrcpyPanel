@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      TFM 必须与被引用的应用工程一致（net8.0-windows）：
+      net8.0 工程无法引用 net8.0-windows 工程（NU1201）。
+      UseWindowsForms=true 保证运行测试时能解析 WindowsDesktop 框架引用。
+      注意：全部测试只覆盖 Protocol / CoordinateMapper / Adb 解析 / 模型逻辑，
+      不加载任何 FFmpeg 原生 DLL，也不启动 WinForms 消息循环 → 可无头执行。
+    -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>MultiScrcpy.Tests</RootNamespace>
+  </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+      <PackageReference Include="xunit" Version="2.9.2" />
+      <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        <PrivateAssets>all</PrivateAssets>
+      </PackageReference>
+      <PackageReference Include="coverlet.collector" Version="6.0.2">
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        <PrivateAssets>all</PrivateAssets>
+      </PackageReference>
+      <!-- OpenCvSharp4：使 OpenCvTemplateMatcher 在测试中真正走原生路径（否则回退托管实现） -->
+      <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
+      <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
+    </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MultiScrcpyPanel\MultiScrcpyPanel.csproj" />
+  </ItemGroup>
+
+  <!--
+    OpenCV 原生库已迁移为 OpenCvSharp4（NuGet PackageReference + OpenCvSharp4.runtime.win），
+    不再需要手动复制 opencv_world4120.dll。
+  -->
+
+</Project>

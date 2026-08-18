@@ -1,0 +1,133 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>MultiScrcpy</RootNamespace>
+    <AssemblyName>MultiScrcpyPanel</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Product>MultiScrcpyPanel</Product>
+    <AssemblyTitle>多设备投屏控制面板</AssemblyTitle>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>lightbulb.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 允许测试工程访问 internal 类型（如 OpenCvTemplateMatcher），便于合成图集成测试 -->
+    <InternalsVisibleTo Include="MultiScrcpy.Tests" />
+  </ItemGroup>
+
+    <ItemGroup>
+      <!-- 视频解码：FFmpeg 原生绑定（仅托管绑定，原生 DLL 由 tools/fetch_ffmpeg.ps1 提供，见架构文档 §6.1） -->
+      <PackageReference Include="FFmpeg.AutoGen" Version="6.0.0.2" />
+      <!-- 模板匹配：OpenCvSharp4（替代旧 opencv_world4120.dll 的 C API），照搬 OcrViewer 的 Vision.Match，支持 alpha mask -->
+      <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
+      <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
+    </ItemGroup>
+
+  <!--
+    ======================================================================
+    原生 FFmpeg DLL → 输出目录 ffmpeg\x64\（架构文档 §6.1）
+
+    FFmpegBinariesHelper.Register() 默认在 {AppContext.BaseDirectory}\ffmpeg\x64
+    下**平铺**查找 avutil-58 / avcodec-60 / swscale-7 / swresample-4，
+    因此这里无论源目录是哪种布局，Link 一律铺平到 ffmpeg\x64\。
+
+    支持两种源布局（互斥，优先平铺）：
+      A. 平铺（tools\fetch_ffmpeg.ps1 的产物）
+         native\ffmpeg\x64\avutil-58.dll ...
+      B. 嵌套（官方 zip 直接解压的产物，可能嵌套任意层）
+         native\ffmpeg\x64\ffmpeg-6.1.1-full_build-shared\
+             ffmpeg-6.1.1-full_build-shared\bin\avutil-58.dll ...
+
+    用 _FFmpegFlatProbe 做互斥判定，避免两种布局同时存在时同名 DLL
+    被登记两次（重复的 Link 目标会导致冗余复制与 MSB3026 告警）。
+
+    ⚠️ 版本配对铁律不变：FFmpeg.AutoGen 6.0.0.2 ↔ FFmpeg 6.x shared。
+    ======================================================================
+  -->
+  <ItemGroup>
+    <_FFmpegFlatProbe Include="..\native\ffmpeg\x64\*.dll" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'@(_FFmpegFlatProbe)' != ''">
+    <None Include="..\native\ffmpeg\x64\*.dll" Link="ffmpeg\x64\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'@(_FFmpegFlatProbe)' == ''">
+    <None Include="..\native\ffmpeg\x64\**\*.dll" Link="ffmpeg\x64\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- scrcpy-server jar：优先 csharp\assets\，其次仓库根 assets\
+         AppConfig.ResolveServerJar() 期望 {BaseDirectory}\assets\scrcpy-server-v{ServerVersion}.jar -->
+    <None Include="..\assets\*.jar" Link="assets\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="..\..\assets\*.jar" Link="assets\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 脚本引擎示例脚本：复制到输出目录 scripts\（与 exe 同目录，运行时由 ScriptEngine.DefaultScriptsDirectory 读取） -->
+    <None Include="..\scripts\**\*.scr" Link="scripts\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
+    OpenCV 原生库已迁移为 OpenCvSharp4（NuGet PackageReference + OpenCvSharp4.runtime.win），
+    不再需要手动复制 opencv_world4120.dll。旧的 opencv_world4120.dll DllImport C API 实现已移除。
+  -->
+
+  <ItemGroup>
+    <!-- OCR 识别模板图片：复制到输出目录 templates\（运行时由 ScriptEngine.TemplatesDirectory 读取） -->
+    <None Include="..\templates\**\*" Link="templates\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
+    构建期自检：输出目录必须存在 4 个必备 DLL，否则给出明确告警
+    （不设为 Error：CI / 无原生依赖的纯单测场景仍需要能构建通过）。
+  -->
+  <ItemGroup>
+    <None Include="generate_app_icon.ps1" />
+  </ItemGroup>
+
+  <Target Name="GenerateAppIcon" BeforeTargets="BeforeBuild"
+          Inputs="generate_app_icon.ps1" Outputs="lightbulb.ico">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File generate_app_icon.ps1 -OutFile lightbulb.ico"
+          ContinueOnError="true">
+    </Exec>
+  </Target>
+
+  <Target Name="VerifyFFmpegNatives" AfterTargets="Build">
+    <ItemGroup>
+      <_FFmpegOutDll Include="$(OutDir)ffmpeg\x64\avutil-58.dll" />
+      <_FFmpegOutDll Include="$(OutDir)ffmpeg\x64\avcodec-60.dll" />
+      <_FFmpegOutDll Include="$(OutDir)ffmpeg\x64\swscale-7.dll" />
+      <_FFmpegOutDll Include="$(OutDir)ffmpeg\x64\swresample-4.dll" />
+      <_FFmpegMissing Include="@(_FFmpegOutDll)" Condition="!Exists('%(FullPath)')" />
+    </ItemGroup>
+    <Warning Condition="'@(_FFmpegMissing)' != ''"
+             Text="FFmpeg 原生库未就位，输出目录 $(OutDir)ffmpeg\x64\ 缺少：@(_FFmpegMissing->'%(Filename)%(Extension)', '、')。运行 pwsh tools\fetch_ffmpeg.ps1 后重新构建（仅影响运行时解码，单元测试不受影响）。" />
+  </Target>
+
+</Project>

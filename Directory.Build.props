@@ -1,0 +1,24 @@
+<Project>
+
+  <!--
+    统一的编译期约定（架构文档 §7.3）。
+    位于 csharp/ 目录下，作用于 MultiScrcpyPanel 与 MultiScrcpy.Tests 两个工程。
+  -->
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- 可空引用违规视为错误（架构文档 §9.1） -->
+    <WarningsAsErrors>CS8600;CS8602;CS8618</WarningsAsErrors>
+    <NeutralLanguage>zh-Hans</NeutralLanguage>
+    <!-- 允许在仅安装了较新 SDK 的机器上构建 net8.0-windows -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AccelerateBuildsInVisualStudio>true</AccelerateBuildsInVisualStudio>
+  </PropertyGroup>
+
+</Project>
