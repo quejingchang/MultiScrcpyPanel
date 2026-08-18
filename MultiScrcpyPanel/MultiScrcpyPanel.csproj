@@ -103,6 +103,14 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Android platform-tools（adb 等）：复制到输出目录 platform-tools\，运行时由 AppConfig.ResolveAdb() 优先探测 -->
+    <None Include="..\platform-tools\**\*" Link="platform-tools\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
   <!--
     构建期自检：输出目录必须存在 4 个必备 DLL，否则给出明确告警
     （不设为 Error：CI / 无原生依赖的纯单测场景仍需要能构建通过）。
