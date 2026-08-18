@@ -9,10 +9,11 @@ obj/
 logs/
 config/settings.json
 
-# ---- 外部二进制 / 第三方库（由 tools/ 脚本下载或构建，不入库）----
+# ---- 运行必要资源（入库：scrcpy-server.jar / platform-tools adb 等，设备连接依赖）----
+
+# ---- 外部下载依赖（由 tools/ 脚本下载或构建，不入库）----
 native/
 opencv/
-assets/*.jar
 
 # ---- 本机同步 / 临时产物 / 日志（不入库）----
 .sync-conflict-backup/
