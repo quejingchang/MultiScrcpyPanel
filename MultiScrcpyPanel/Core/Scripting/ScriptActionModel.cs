@@ -243,6 +243,7 @@ public static class ScriptActionModel
         int wait = 300;
         double dx = 0, dy = 0;
         bool center = false;
+        bool stopOnFail = false;
         string? clickText = null;
 
         for (int i = 1; i < parts.Length; i++)
@@ -273,6 +274,15 @@ public static class ScriptActionModel
                 case "TEXT":
                     clickText = ParseOcrTextArg(parts, ref i);
                     break;
+                case "ONFAIL":
+                    if (i + 1 >= parts.Length || parts[i + 1].ToUpperInvariant() != "STOP")
+                    {
+                        throw new FormatException("OCR 的 ONFAIL 需要接 STOP（当前仅支持 ONFAIL STOP）");
+                    }
+
+                    stopOnFail = true;
+                    i++;
+                    break;
                 default:
                     images.Add(parts[i]);
                     break;
@@ -284,7 +294,7 @@ public static class ScriptActionModel
             throw new FormatException("OCR 至少需要一张图片");
         }
 
-        return new OcrStep(images, maxErr, timeout, retry, wait, dx, dy, center, clickText);
+        return new OcrStep(images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail);
     }
 
     /// <summary>
@@ -530,7 +540,27 @@ public static class ScriptActionModel
             throw new FormatException("WAIT 缺少毫秒");
         }
 
-        return new WaitStep(Int(parts[1]));
+        // 单参数：WAIT <毫秒>（固定等待）
+        if (parts.Length == 2)
+        {
+            return new WaitStep(Int(parts[1]));
+        }
+
+        // 双参数：WAIT <最小毫秒> <最大毫秒>（范围内随机等待）
+        int min = Int(parts[1]);
+        int max = Int(parts[2]);
+        if (max == 0 || max == min)
+        {
+            // 上限为 0 或等于下限：退化为固定等待
+            return new WaitStep(min);
+        }
+
+        if (max < min)
+        {
+            throw new FormatException($"WAIT 最大毫秒({max})不能小于最小毫秒({min})");
+        }
+
+        return new WaitStep(min, max);
     }
 
     private static ScriptStep ParseKey(string[] parts)
@@ -593,8 +623,10 @@ public sealed class OcrStep : ScriptStep
     public double Dy { get; set; }
     public bool UseCenter { get; set; }
     public string? Text { get; set; }
+    /// <summary>ONFAIL STOP：重试耗尽仍未命中时停止整个脚本（默认 false = 继续下一步）。</summary>
+    public bool StopOnFail { get; set; }
 
-    public OcrStep(List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null)
+    public OcrStep(List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false)
     {
         Images = images;
         MaxError = maxError;
@@ -605,6 +637,7 @@ public sealed class OcrStep : ScriptStep
         Dy = dy;
         UseCenter = useCenter;
         Text = text;
+        StopOnFail = stopOnFail;
     }
 
     public override ScriptStepKind Kind => ScriptStepKind.Ocr;
@@ -649,6 +682,12 @@ public sealed class OcrStep : ScriptStep
             p.Add("CENTER");
         }
 
+        if (StopOnFail)
+        {
+            p.Add("ONFAIL");
+            p.Add("STOP");
+        }
+
         if (!string.IsNullOrWhiteSpace(Text))
         {
             p.Add("TEXT");
@@ -665,7 +704,8 @@ public sealed class OcrStep : ScriptStep
             string imgs = Images.Count == 0 ? "(未选图)" : string.Join("、", Images);
             string txt = string.IsNullOrWhiteSpace(Text) ? "" : $" 文字[{Text}]";
             string mode = UseCenter ? "中心" : "随机";
-            return $"OCR 识别[{imgs}]{txt}  {mode}点击  容差{MaxError:P0}";
+            string stop = StopOnFail ? "  失败即停" : string.Empty;
+            return $"OCR 识别[{imgs}]{txt}  {mode}点击  容差{MaxError:P0}{stop}";
         }
     }
 }
@@ -833,18 +873,24 @@ public sealed class SwipeStep : ScriptStep
     public override string Summary => $"滑动 ({Fmt(X1)},{Fmt(Y1)})→({Fmt(X2)},{Fmt(Y2)}) {DurationMs}ms";
 }
 
-/// <summary>等待。</summary>
+/// <summary>等待（MaxMs 非 null 时表示范围内随机等待）。</summary>
 public sealed class WaitStep : ScriptStep
 {
     public int Ms { get; set; }
+    /// <summary>范围随机等待上限；null 表示固定等待（WAIT &lt;毫秒&gt;）。</summary>
+    public int? MaxMs { get; set; }
 
-    public WaitStep(int ms) => Ms = ms;
+    public WaitStep(int ms, int? maxMs = null)
+    {
+        Ms = ms;
+        MaxMs = maxMs;
+    }
 
     public override ScriptStepKind Kind => ScriptStepKind.Wait;
 
-    public override string ToDsl() => "WAIT " + Ms;
+    public override string ToDsl() => MaxMs == null ? "WAIT " + Ms : $"WAIT {Ms} {MaxMs.Value}";
 
-    public override string Summary => $"等待 {Ms}ms";
+    public override string Summary => MaxMs == null ? $"等待 {Ms}ms" : $"等待 {Ms}~{MaxMs.Value}ms（随机）";
 }
 
 /// <summary>按键（keycode 数字或别名，如 BACK/HOME）。</summary>

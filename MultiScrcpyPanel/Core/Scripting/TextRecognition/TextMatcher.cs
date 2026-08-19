@@ -74,8 +74,15 @@ internal static class TextMatcher
     /// 在候选词中查找能拼出目标文本的一组连续词，返回其合并包围盒与误差。
     /// <para>
     /// 这对中文 UI 尤其重要：Tesseract 常把"参加"拆成"参""加"两个词，
-    /// 严格整词匹配会失败；本方法按阅读顺序（上→下、左→右）尝试连续词合并，
-    /// 命中后返回覆盖所有组成词的并集包围盒，从而定位到正确的文字中心。
+    /// 严格整词匹配会失败；本方法先做单字/子串扫描，再按阅读顺序（上→下、左→右）
+    /// 尝试连续词合并，命中后返回覆盖所有组成词的并集包围盒，从而定位到正确的文字中心。
+    /// </para>
+    /// <para>
+    /// 单字优先（BugFix）：当目标文字被某个<b>候选词本身</b>直接包含（err=0）时，
+    /// 优先返回该词，不做多字合并。修复场景：Tesseract 把"运""镖""电""参加"识别为
+    /// 独立词时，旧逻辑从阅读顺序靠前的"运"开始顺次合并出"运镖电参加"（仅包含目标），
+    /// 其并集包围盒中心被无关前缀拉向模板中部，导致点击错位；本方法直接返回"参加"
+    /// 单词的包围盒（短词优先，避免"运镖电参加"这类带无关前缀的长词）。
     /// </para>
     /// </summary>
     /// <returns>(合并包围盒, 误差)；未找到则返回 (null, +∞)。</returns>
@@ -88,6 +95,27 @@ internal static class TextMatcher
 
         string t = Normalize(target, false);
 
+        // 第一遍：单字/子串扫描。目标文字被某个候选词直接包含（err=0）时，
+        // 直接返回该单词的包围盒，避免多字合并把无关前缀（如"运""镖""电"）并进来。
+        // 排序：文本长度升序（短词优先——"参加"优于"运镖电参加"），
+        // 同长度按阅读顺序（Y 升序、X 升序）保持确定性。
+        RecognizedTextLine? direct = candidates
+            .Where(c => !string.IsNullOrWhiteSpace(c.Text))
+            .Select(c => (Word: c, Norm: Normalize(c.Text, false)))
+            .Where(x => x.Norm.Contains(t, StringComparison.Ordinal))
+            .OrderBy(x => x.Norm.Length)
+            .ThenBy(x => x.Word.Y)
+            .ThenBy(x => x.Word.X)
+            .Select(x => x.Word)
+            .FirstOrDefault();
+
+        if (direct != null)
+        {
+            return (direct, 0);
+        }
+
+        // 第二遍（兜底）：单字扫描无命中（err=0）时，才用"顺次扩展合并"逻辑
+        // 兼容"参""加"被 Tesseract 拆成两个词等场景。
         // 按阅读顺序排序，保证连续合并符合视觉顺序。
         var ordered = candidates
             .Where(c => !string.IsNullOrWhiteSpace(c.Text))

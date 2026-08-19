@@ -137,4 +137,76 @@ public class ScriptActionModelTests
         Assert.False(ok);
         Assert.Contains(errs, e => e.Contains("OCR"));
     }
+
+    // ---- WAIT 范围随机 / OCR ONFAIL STOP 模型 ----
+
+    [Fact]
+    public void WAIT单参_roundtrip_保持固定()
+    {
+        const string src = "WAIT 2000\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var w = Assert.IsType<WaitStep>(steps[0]);
+        Assert.Equal(2000, w.Ms);
+        Assert.Null(w.MaxMs);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "WAIT固定");
+        Assert.Contains("WAIT 2000", outp);
+    }
+
+    [Fact]
+    public void WAIT双参_roundtrip_解析为范围并保留()
+    {
+        const string src = "WAIT 2000 5000\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var w = Assert.IsType<WaitStep>(steps[0]);
+        Assert.Equal(2000, w.Ms);
+        Assert.Equal(5000, w.MaxMs);
+        Assert.Contains("随机", w.Summary);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "WAIT范围");
+        Assert.Contains("WAIT 2000 5000", outp);
+    }
+
+    [Fact]
+    public void WAIT双参_上下限相同_退化为固定()
+    {
+        const string src = "WAIT 3000 3000\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var w = Assert.IsType<WaitStep>(steps[0]);
+        Assert.Equal(3000, w.Ms);
+        Assert.Null(w.MaxMs);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "WAIT退化");
+        Assert.Contains("WAIT 3000", outp);
+    }
+
+    [Fact]
+    public void OCR_ONFAIL_STOP_roundtrip_保留标记()
+    {
+        const string src = "OCR a.png ONFAIL STOP\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var o = Assert.IsType<OcrStep>(steps[0]);
+        Assert.True(o.StopOnFail);
+        Assert.Contains("失败即停", o.Summary);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "OCR ONFAIL");
+        Assert.Contains("ONFAIL STOP", outp);
+    }
+
+    [Fact]
+    public void OCR_无ONFAIL_roundtrip_不输出标记()
+    {
+        const string src = "OCR a.png\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var o = Assert.IsType<OcrStep>(steps[0]);
+        Assert.False(o.StopOnFail);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "OCR 无ONFAIL");
+        Assert.DoesNotContain("ONFAIL", outp);
+    }
 }

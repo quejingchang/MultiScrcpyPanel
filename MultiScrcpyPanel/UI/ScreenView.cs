@@ -36,10 +36,11 @@ public sealed class ScreenView : Control
     public event Action<double, double>? CoordinateCaptured;
 
     // ⭐ OCR / FIND 命中标记：归一化视频坐标矩形（x1,y1,x2,y2 ∈ 0–1）叠加在画面上层，
-    //    持续 OcrMarkerMs 后自动消失。支持同时显示多个（多图标各自命中、交集分别高亮）。
+    //    持续 OcrMarkerMs 后自动消失。同一时刻只显示最近一次命中标记：新标记出现时先回收旧标记
+    //    （单标记模式），因此不会出现多个标记并存。
     private readonly List<(RectangleF Rect, DateTime Expire)> _ocrMarkers = new();
     private readonly System.Windows.Forms.Timer _ocrTimer = new() { Interval = 80 };
-    private const int OcrMarkerMs = 1000;
+    private const int OcrMarkerMs = 3000;
 
     /// <summary>创建画面控件。</summary>
     public ScreenView()
@@ -307,8 +308,9 @@ public sealed class ScreenView : Control
     }
 
     /// <summary>
-    /// 在画面上叠加一个 OCR / FIND 命中标记（归一化视频坐标 nx∈[0,1]），约 1 秒后自动消失。
-    /// 支持同时叠加多个（如多图标各自命中、再叠加交集），并立即同步重绘一次以保证命中瞬间可见。
+    /// 在画面上叠加一个 OCR / FIND 命中标记（归一化视频坐标 nx∈[0,1]），约 3 秒后自动消失。
+    /// 单标记模式：新标记出现时先回收旧标记（<c>_ocrMarkers.Clear()</c>），同一时刻只显示最近一次
+    /// 命中标记，并立即同步重绘一次以保证命中瞬间可见。
     /// 应在 UI 线程调用（通常由 <see cref="UiTheme.SafePost"/> 投递）。
     /// </summary>
     public void ShowOcrMarker(double nx1, double ny1, double nx2, double ny2)
@@ -330,6 +332,8 @@ public sealed class ScreenView : Control
 
         lock (_ocrMarkers)
         {
+            // ⭐ 单标记模式：新标记出现前先回收当前所有标记，同一时刻只保留最近一次命中。
+            _ocrMarkers.Clear();
             _ocrMarkers.Add((rect, DateTime.UtcNow.AddMilliseconds(OcrMarkerMs)));
         }
 
@@ -338,7 +342,7 @@ public sealed class ScreenView : Control
         Refresh();
     }
 
-    /// <summary>每 80ms 触发：清除过期标记，其余持续重绘以保持可见（约 1s）。</summary>
+    /// <summary>每 80ms 触发：清除过期标记，其余持续重绘以保持可见（约 3s）。</summary>
     private void OcrTimerTick()
     {
         bool any;

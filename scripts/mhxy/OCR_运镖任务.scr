@@ -1,17 +1,13 @@
-# 梦幻西游手游 · 运镖任务 — OCR 图像识别版
-# 流程为通用模板，请按真实截图微调。图标来自 csharp/templates/。
-OCR 导航_活动按钮.png
+OCR 导航_活动按钮.png MAXERR 0.15
 WAIT 800
-OCR 标签_日常活动.png
+OCR 标签_日常活动2.png MAXERR 0.15
 WAIT 500
-OCR 日常_运镖.png
-WAIT 600
-OCR 按钮_参加.png
-WAIT 1500
-LOOP 10
-  WAIT 4000
-  OCR 按钮_确定.png
-  WAIT 600
-  OCR 按钮_使用.png
-  WAIT 800
+OCR 日常_运镖.png MAXERR 0.15 TEXT "参加"
+WAIT 6000
+OCR NPC_押送普通镖银.png MAXERR 0.15
+WAIT 500
+LOOP 3
+  OCR 日常_运镖-确定.png MAXERR 0.15
+  WAIT 300000
 ENDLOOP
+WAIT 500

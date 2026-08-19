@@ -293,4 +293,104 @@ public class ScriptOcrTests
 
         Assert.Empty(hits);
     }
+
+    // ---- ONFAIL STOP：重试耗尽后停止脚本 ----
+
+    [Fact]
+    public void 解析_OCR_ONFAIL_STOP_置StopOnFail为true()
+    {
+        Assert.True(ScriptEngine.TryParse("OCR a.png ONFAIL STOP", "t", out ScriptProgram? p, out _));
+        var ocr = Assert.IsType<OcrInstruction>(p!.Instructions[0]);
+        Assert.True(ocr.StopOnFail);
+    }
+
+    [Fact]
+    public void 解析_OCR_无ONFAIL_StopOnFail默认为false()
+    {
+        Assert.True(ScriptEngine.TryParse("OCR a.png", "t", out ScriptProgram? p, out _));
+        var ocr = Assert.IsType<OcrInstruction>(p!.Instructions[0]);
+        Assert.False(ocr.StopOnFail);
+    }
+
+    [Fact]
+    public void 解析_OCR_ONFAIL_未接STOP_报错()
+    {
+        bool ok = ScriptEngine.TryParse("OCR a.png ONFAIL", "t", out _, out List<string>? errs);
+        Assert.False(ok);
+        Assert.Contains(errs!, e => e.Contains("ONFAIL"));
+    }
+
+    [Fact]
+    public async Task 执行_OCR_重试耗尽_ONFAIL_STOP_抛ScriptFailStopException()
+    {
+        // 永不命中 + RETRY 0（首次尝试即耗尽）+ ONFAIL STOP → 抛异常停止脚本。
+        var matcher = new FakeMatcher();
+
+        string dir = MakeTempDir();
+        WritePng(dir, "a.png");
+
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+        ScriptFailStopException ex = await Assert.ThrowsAsync<ScriptFailStopException>(() =>
+            ScriptEngine.ExecuteAsync(
+                ScriptEngine.Parse("OCR a.png RETRY 0 ONFAIL STOP", "t"), sink, 100, 200, default,
+                matcher: matcher, templatesDirectory: dir));
+
+        Assert.Contains("a.png", ex.Message);
+        Assert.Contains("重试上限", ex.Message);
+        Assert.Equal(1, ex.Line);
+    }
+
+    [Fact]
+    public async Task 执行_OCR_模板缺失_ONFAIL_STOP_抛ScriptFailStopException()
+    {
+        var matcher = new FakeMatcher();
+
+        string dir = MakeTempDir();
+        // a.png 不创建
+
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+        await Assert.ThrowsAsync<ScriptFailStopException>(() =>
+            ScriptEngine.ExecuteAsync(
+                ScriptEngine.Parse("OCR a.png RETRY 0 ONFAIL STOP", "t"), sink, 100, 200, default,
+                matcher: matcher, templatesDirectory: dir));
+    }
+
+    [Fact]
+    public async Task 执行_OCR_重试耗尽_无ONFAIL_继续下一步()
+    {
+        // 回归：无 ONFAIL 时保持原有行为——重试耗尽后静默继续，后续 TAP 仍执行。
+        var matcher = new FakeMatcher(); // 永不命中
+
+        string dir = MakeTempDir();
+        WritePng(dir, "a.png");
+
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+        await ScriptEngine.ExecuteAsync(
+            ScriptEngine.Parse("OCR a.png RETRY 0\nTAP 0.5 0.5", "t"), sink, 100, 200, default,
+            matcher: matcher, templatesDirectory: dir);
+
+        // OCR 未点击，但后续 TAP 正常执行。
+        Assert.DoesNotContain(sink.Calls, c => c.StartsWith("DOWN") && c != "DOWN 50,100");
+        Assert.Contains("DOWN 50,100", sink.Calls);
+    }
+
+    [Fact]
+    public async Task 执行_OCR_重试内命中_ONFAIL_STOP_正常点击并继续()
+    {
+        // ONFAIL STOP 只影响失败路径：命中后照常点击，且不影响后续步骤。
+        var matcher = new FakeMatcher();
+        matcher.Responses.Enqueue(new TemplateMatch(0.50, 0.50, 0.10, 0.10, 0.95));
+
+        string dir = MakeTempDir();
+        WritePng(dir, "a.png");
+
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+        await ScriptEngine.ExecuteAsync(
+            ScriptEngine.Parse("OCR a.png ONFAIL STOP\nTAP 0.5 0.5", "t"), sink, 100, 200, default,
+            matcher: matcher, templatesDirectory: dir);
+
+        // OCR 命中点击 1 次 + TAP 1 次。
+        Assert.Equal(2, sink.Calls.Count(c => c.StartsWith("DOWN")));
+        Assert.Contains("DOWN 50,100", sink.Calls);
+    }
 }

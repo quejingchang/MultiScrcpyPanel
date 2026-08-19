@@ -320,6 +320,15 @@ public sealed class ScriptPanelForm : Form
                     _onStatus?.Invoke($"脚本已停止：{fileName} @ {serial}");
                 });
             }
+            catch (ScriptFailStopException ex)
+            {
+                // OCR ONFAIL STOP：重试耗尽仍未命中导致脚本停止（区别于用户手动取消）。
+                this.SafePost(() =>
+                {
+                    Log($"脚本已停止：{ex.Message} @ {serial}");
+                    _onStatus?.Invoke($"脚本已停止：{ex.Message} @ {serial}");
+                });
+            }
             catch (Exception ex)
             {
                 Log("运行出错：" + ex.Message);

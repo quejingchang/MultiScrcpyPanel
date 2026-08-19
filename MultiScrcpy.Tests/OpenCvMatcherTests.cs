@@ -13,7 +13,7 @@ namespace MultiScrcpy.Tests;
 /// <para>
 /// 用 GDI+ 绘制带已知图标的帧，验证：
 /// 1) 灰度 + Alpha mask 匹配能正确排除透明背景（mask 路径生效）；
-/// 2) 0.6–1.4 多尺度在等尺寸、模板较小（上采样 ≈1.20×）、模板较大（下采样 ≈0.80×）三种情况下都能命中；
+/// 2) 0.85–1.15 多尺度在等尺寸、模板较小（上采样 ≈1.09×）、模板较大（下采样 ≈0.86×）三种情况下都能命中；
 /// 3) 不同前景/背景的模板不会被误命中（返回 null）；
 /// 4) 1:1 高分辨率模板匹配置信度接近 1。
 /// 模板均为"带背景边距的图标"（TM_CCOEFF_NORMED 对纯色常数图会退化，真实模板不会如此）。
@@ -114,10 +114,10 @@ public class OpenCvMatcherTests
     {
         if (!OpenCvTemplateMatcher.IsAvailable) return;
 
-        // 帧中图标 48×48；模板 40×40 红方块（含 72×72 边距，方块居中）。
-        // 多尺度在 s=1.20 时模板方块放大到 48，命中（落在 0.6–1.4 范围内）。
+        // 帧中图标 48×48；模板 72×72 内含 44×44 红方块（边距 14）。
+        // 多尺度在 s=1.09（48/44）时模板方块放大到 ~48，命中（落在 0.85–1.15 范围内）。
         using var frame = MakeFrame(100, 80, 48);
-        using var tpl = MakeIcon(72, 40, 16, 16, Red);
+        using var tpl = MakeIcon(72, 44, 14, 14, Red);
 
         TemplateMatch? m = new OpenCvTemplateMatcher().Match(frame, tpl, 0.15);
         Assert.NotNull(m);
@@ -133,10 +133,10 @@ public class OpenCvMatcherTests
     {
         if (!OpenCvTemplateMatcher.IsAvailable) return;
 
-        // 帧中图标 48×48；模板 60×60 红方块（含 96×96 边距，方块居中）。
-        // 多尺度在 s=0.80 时模板方块缩小到 48，命中（落在 0.6–1.4 范围内）。
+        // 帧中图标 48×48；模板 96×96 内含 56×56 红方块（边距 20）。
+        // 多尺度在 s=0.86（48/56）时模板方块缩小到 ~48，命中（落在 0.85–1.15 范围内）。
         using var frame = MakeFrame(150, 100, 48);
-        using var tpl = MakeIcon(96, 60, 18, 18, Red);
+        using var tpl = MakeIcon(96, 56, 20, 20, Red);
 
         TemplateMatch? m = new OpenCvTemplateMatcher().Match(frame, tpl, 0.15);
         Assert.NotNull(m);
@@ -198,7 +198,7 @@ public class OpenCvMatcherTests
         if (!OpenCvTemplateMatcher.IsAvailable) return;
 
         // 模拟 OcrViewer 场景：视频流已是高分辨率，模板与目标 1:1。
-        // 此时只需在 0.6–1.4 范围内搜索，scale 1.00 即可给出接近 1.0 的置信度。
+        // 此时只需在 0.85–1.15 范围内搜索，scale 1.00 即可给出接近 1.0 的置信度。
         const int iconSize = 91;
         using var frame = new Bitmap(900, 700, PixelFormat.Format24bppRgb);
         using (var g = Graphics.FromImage(frame))

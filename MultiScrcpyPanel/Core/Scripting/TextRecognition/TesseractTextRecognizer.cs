@@ -31,6 +31,16 @@ namespace MultiScrcpy.Core.Scripting.TextRecognition;
 /// 仅用于让 OCR_TEXT 的"按文本命中并点击"逻辑有可点击区域；
 /// 精确坐标仍建议用模板匹配（OCR/FIND）路线获取。
 /// </para>
+/// <para>
+/// 2026-08-18 三通道融合（仅 <see cref="RecognizeWordsAsync"/>）：
+/// 通道 A 保留原"灰度 + 2x Cubic"行为；通道 B 额外做 Otsu 自适应二值化——游戏 UI
+/// （深棕字 + 米色渐变 + 装饰边框）在二值化下对比度显著提升，可救回灰度通道完全失败的样本
+/// （如"帮派任务"）、修复拆词（"使 用"）并去除渐变噪点；通道 C 取 HSV 色彩空间的 V（亮度）通道
+/// ——彩色字/背景在 V 通道天然去色（如"橙黄按钮 + 深棕字"对比度被灰度化冲淡，V 通道仍保持高对比），
+/// 可救回灰度与 Otsu 均救不回的彩色低对比样本（如"日常_宝图任务.png"的"参加"按钮）。
+/// 三通道词列表按"文字内容相同 + 归一化中心距离 ≤ 0.02"合并去重，优先级 A &gt; B &gt; C；
+/// 任一通道失败自动降级（不拖垮其他通道），全部失败才抛出首个异常。
+/// </para>
 /// </summary>
 public sealed class TesseractTextRecognizer : ITextRecognizer
 {
@@ -41,6 +51,7 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
     private readonly double _scale;
     private readonly bool _grayscale;
     private readonly string _whitelist;
+    private readonly bool _enableBinaryChannel;
 
     /// <summary>创建 Tesseract 识别器。</summary>
     /// <param name="exePath">tesseract.exe 显式路径；为空则按显式路径 → 默认安装目录 → PATH → 程序目录顺序探测。</param>
@@ -50,6 +61,11 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
     /// <param name="scale">预处理放大倍数，默认 2.0；小于等于 1 视为不放大。</param>
     /// <param name="grayscale">是否先做灰度化，默认 true。</param>
     /// <param name="whitelist">字符白名单（tessedit_char_whitelist）；为空则不限制。</param>
+    /// <param name="enableBinaryChannel">
+    /// 是否启用 <see cref="RecognizeWordsAsync"/> 的附加通道（通道 B：Otsu 自适应二值化；
+    /// 通道 C：HSV-V 亮度通道）识别，默认 true。置 false 可退回"单通道灰度"的旧行为
+    /// （用于排查/对比）。两路附加通道互相独立、互不依赖，可独立失败降级。
+    /// </param>
     public TesseractTextRecognizer(
         string? exePath = null,
         string language = "chi_sim+eng",
@@ -57,7 +73,8 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
         int oem = 1,
         double scale = 2.0,
         bool grayscale = true,
-        string? whitelist = null)
+        string? whitelist = null,
+        bool enableBinaryChannel = true)
     {
         _exePath = FindTesseract(exePath);
         _language = string.IsNullOrWhiteSpace(language) ? "chi_sim+eng" : language;
@@ -66,6 +83,7 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
         _scale = scale > 1.0 ? scale : 1.0;
         _grayscale = grayscale;
         _whitelist = whitelist ?? string.Empty;
+        _enableBinaryChannel = enableBinaryChannel;
     }
 
     /// <inheritdoc />
@@ -137,42 +155,112 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
             return Array.Empty<RecognizedTextLine>();
         }
 
-        string? tmp = null;
+        string? tmpA = null;
+        string? tmpB = null;
+        string? tmpC = null;
         try
         {
-            tmp = Path.Combine(Path.GetTempPath(), $"mscp_tessw_{Guid.NewGuid():N}.png");
-            using (Mat processed = PreprocessToMat(bitmap))
+            Exception? firstError = null;
+            bool anyChannelSucceeded = false;
+
+            // 通道 A：灰度 + 2x Cubic 放大（完全保留原行为）。
+            IReadOnlyList<RecognizedTextLine> wordsA = Array.Empty<RecognizedTextLine>();
+            try
             {
-                Cv2.ImWrite(tmp, processed);
-                int pw = processed.Width;
-                int ph = processed.Height;
-
-                // 用 tsv 输出格式获取每个词的真实包围盒（对齐 OcrViewer 不使用 TSV 纯文本，
-                // 但模板内文字定位需要坐标，故此处改用 tsv；解析对编码与列数做了防御）。
-                string tsv = await RunTesseractAsync(tmp, token, "tsv");
-                var words = ParseTsvWords(tsv, pw, ph);
-
-                // PSM 6（默认，整块文本）不适合游戏 UI：界面文字分散在不同位置，
-                // PSM 6 经常漏识别。当默认 PSM 识别过少且未主动指定 PSM 11 时，
-                // 自动用 PSM 11（sparse text，任意位置找尽可能多的文字）回退重试。
-                if (words.Count < 3 && _psm != 11)
+                tmpA = Path.Combine(Path.GetTempPath(), $"mscp_tessw_{Guid.NewGuid():N}.png");
+                using (Mat processed = PreprocessToMat(bitmap))
                 {
-                    string tsvSparse = await RunTesseractAsync(tmp, token, "tsv", psmOverride: 11);
-                    var wordsSparse = ParseTsvWords(tsvSparse, pw, ph);
-                    if (wordsSparse.Count > words.Count)
+                    Cv2.ImWrite(tmpA, processed);
+                    wordsA = await RunWordsChannelAsync(tmpA, processed.Width, processed.Height, token);
+                    anyChannelSucceeded = true;
+                }
+            }
+            catch (Exception ex) when (IsDegradableChannelError(ex))
+            {
+                // 通道 A 降级：不影响附加通道的尝试；全部失败时由末尾的抛异常逻辑兜底。
+                firstError ??= ex;
+                Debug.WriteLine($"[OCR] 通道 A（灰度+2x）识别失败，降级：{ex.Message}");
+                wordsA = Array.Empty<RecognizedTextLine>();
+            }
+
+            // 通道 B：灰度 + 2x Cubic 放大 + Otsu 自适应二值化（THRESH_BINARY + THRESH_OTSU）。
+            // 游戏 UI（深棕字 + 米色渐变 + 装饰边框）在二值化下对比度显著提升，可救回灰度通道
+            // 完全失败的样本（如"帮派任务"）、修复拆词（"使 用"）并去除渐变噪点；
+            // 但二值化也会破坏部分干净模板（如"师门任务"），故必须与通道 A 融合而非一刀切。
+            IReadOnlyList<RecognizedTextLine> wordsB = Array.Empty<RecognizedTextLine>();
+            if (_enableBinaryChannel)
+            {
+                try
+                {
+                    tmpB = Path.Combine(Path.GetTempPath(), $"mscp_tessw_b_{Guid.NewGuid():N}.png");
+                    using (Mat binary = BuildBinaryMat(bitmap))
                     {
-                        return wordsSparse;
+                        Cv2.ImWrite(tmpB, binary);
+                        wordsB = await RunWordsChannelAsync(tmpB, binary.Width, binary.Height, token);
+                        anyChannelSucceeded = true;
                     }
                 }
-
-                return words;
+                catch (Exception ex) when (IsDegradableChannelError(ex))
+                {
+                    firstError ??= ex;
+                    Debug.WriteLine($"[OCR] 通道 B（Otsu 二值化）识别失败，降级：{ex.Message}");
+                    wordsB = Array.Empty<RecognizedTextLine>();
+                }
             }
+
+            // 通道 C：HSV-V 亮度通道 + 2x Cubic 放大（2026-08-18 新增）。
+            // V 通道天然去色：所有彩色字在 V 通道都成深色、彩色背景成浅色；
+            // "橙黄按钮 + 深棕字"（如"日常_宝图任务.png"的"参加"）在灰度化后对比被冲淡，
+            // 但 V 通道仍能保持字/底高对比，可救回灰度与 Otsu 均失败的彩色低对比样本。
+            // 失败自动降级：不影响通道 A/B 结果。
+            IReadOnlyList<RecognizedTextLine> wordsC = Array.Empty<RecognizedTextLine>();
+            if (_enableBinaryChannel)
+            {
+                try
+                {
+                    tmpC = Path.Combine(Path.GetTempPath(), $"mscp_tessw_c_{Guid.NewGuid():N}.png");
+                    using (Mat value = BuildValueChannelMat(bitmap))
+                    {
+                        Cv2.ImWrite(tmpC, value);
+                        wordsC = await RunWordsChannelAsync(tmpC, value.Width, value.Height, token);
+                        anyChannelSucceeded = true;
+                    }
+                }
+                catch (Exception ex) when (IsDegradableChannelError(ex))
+                {
+                    firstError ??= ex;
+                    Debug.WriteLine($"[OCR] 通道 C（HSV-V 亮度）识别失败，降级：{ex.Message}");
+                    wordsC = Array.Empty<RecognizedTextLine>();
+                }
+            }
+
+            // 全部尝试过的通道都抛异常时，向上抛首个异常（保留主通道 A 的旧失败语义），
+            // 避免静默返回空列表；至少有任一通道成功则进入合并（可能结果为空是合法情形）。
+            if (!anyChannelSucceeded && firstError != null)
+            {
+                throw firstError;
+            }
+
+            return MergeAndDedupeWords(wordsA, wordsB, wordsC);
         }
         finally
         {
-            if (tmp != null)
+            // 三通道临时文件全清理（任一通道失败也不残留）。
+            if (tmpA != null)
             {
-                try { File.Delete(tmp); }
+                try { File.Delete(tmpA); }
+                catch { /* 临时文件清理失败不影响结果 */ }
+            }
+
+            if (tmpB != null)
+            {
+                try { File.Delete(tmpB); }
+                catch { /* 临时文件清理失败不影响结果 */ }
+            }
+
+            if (tmpC != null)
+            {
+                try { File.Delete(tmpC); }
                 catch { /* 临时文件清理失败不影响结果 */ }
             }
         }
@@ -374,6 +462,284 @@ public sealed class TesseractTextRecognizer : ITextRecognizer
         {
             return null;
         }
+    }
+
+    #endregion
+
+    #region 三通道融合（通道 A 灰度 + 通道 B Otsu + 通道 C HSV-V）
+
+    /// <summary>
+    /// 对单张预处理图片跑 Tesseract TSV 词级识别。
+    /// <para>
+    /// 默认 PSM 6 时<b>始终</b>并行跑 PSM 6（整块文本）+ PSM 11（sparse text）并在通道内合并去重；
+    /// 显式指定其他 PSM（含 11）时尊重调用方意图，只跑单 PSM、不回退。
+    /// </para>
+    /// <para>
+    /// 2026-08-19 修复系统性丢字 Bug：旧逻辑"PSM 6 词数 &lt; 3 才回退 PSM 11"会导致
+    /// 任何"目标文字只在 PSM 11 出现、PSM 6 已识别出其他词"的模板丢字
+    /// （如"日常_师门任务.png"的"参加"：C 通道 PSM 6 命中 15 词不触发回退，
+    /// 但"参加"仅在 PSM 11 出现）。改为始终双跑后，单侧 PSM 失败不拖垮另一侧
+    /// （降级为仅保留成功侧结果），两测全失败才向上抛异常交由外层通道降级。
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<RecognizedTextLine>> RunWordsChannelAsync(
+        string imagePath, int imgW, int imgH, CancellationToken token)
+    {
+        // 显式指定了非默认 PSM（11 或 7/8/12/13…）：单 PSM 模式，不做 PSM 6/11 双跑。
+        if (_psm != 6)
+        {
+            string tsv = await RunTesseractAsync(imagePath, token, "tsv", psmOverride: _psm);
+            return ParseTsvWords(tsv, imgW, imgH);
+        }
+
+        // 用 tsv 输出格式获取每个词的真实包围盒（对齐 OcrViewer 不使用 TSV 纯文本，
+        // 但模板内文字定位需要坐标，故此处改用 tsv；解析对编码与列数做了防御）。
+        // 默认 PSM 6：始终并行跑 PSM 6 + PSM 11（sparse text 找回分散文字），
+        // 通道内合并去重，救回"只在 PSM 11 出现"的字（如"日常_师门任务.png"的"参加"）。
+        Task<string> tsv6Task = RunTesseractAsync(imagePath, token, "tsv", psmOverride: 6);
+        Task<string> tsv11Task = RunTesseractAsync(imagePath, token, "tsv", psmOverride: 11);
+        try
+        {
+            await Task.WhenAll(tsv6Task, tsv11Task);
+        }
+        catch (Exception ex) when (IsDegradableChannelError(ex))
+        {
+            // 单侧 PSM 失败可降级：保留另一侧成功的结果；两测全失败时由下方兜底抛异常。
+            Debug.WriteLine($"[OCR] 通道内 PSM 6/11 双跑部分失败，保留成功侧结果：{ex.Message}");
+        }
+
+        IReadOnlyList<RecognizedTextLine> words6 = Array.Empty<RecognizedTextLine>();
+        IReadOnlyList<RecognizedTextLine> words11 = Array.Empty<RecognizedTextLine>();
+        if (tsv6Task.IsCompletedSuccessfully)
+        {
+            words6 = ParseTsvWords(await tsv6Task, imgW, imgH);
+        }
+
+        if (tsv11Task.IsCompletedSuccessfully)
+        {
+            words11 = ParseTsvWords(await tsv11Task, imgW, imgH);
+        }
+
+        if (words6.Count == 0 && words11.Count == 0 && (tsv6Task.IsFaulted || tsv11Task.IsFaulted))
+        {
+            // 双跑全部失败：抛首个异常，由外层通道降级逻辑统一处理（保持"通道失败不拖垮其他通道"语义）。
+            Exception? err = tsv6Task.Exception?.GetBaseException() ?? tsv11Task.Exception?.GetBaseException();
+            throw err ?? new InvalidOperationException("Tesseract PSM 6/11 双跑均失败。");
+        }
+
+        return MergeAndDedupeWords(words6, words11);
+    }
+
+    /// <summary>
+    /// 判定某通道的异常是否可降级（不拖垮其他通道继续尝试；取消异常必须传播给调用方）。
+    /// <para>
+    /// 涵盖：InvalidOperationException（Tesseract 自身执行失败/无可用语言包）、
+    /// IOException / UnauthorizedAccessException（临时文件读写失败）、
+    /// OpenCvSharpException（OpenCV 矩阵操作失败）、
+    /// <see cref="System.ComponentModel.Win32Exception"/>（进程启动失败）。
+    /// <see cref="OperationCanceledException"/> 不在此列，会正常向上传播以响应取消请求。
+    /// </para>
+    /// </summary>
+    private static bool IsDegradableChannelError(Exception ex) =>
+        ex is InvalidOperationException or IOException or UnauthorizedAccessException
+            or OpenCvSharpException or System.ComponentModel.Win32Exception;
+
+    /// <summary>
+    /// Bitmap → 灰度 → 2x Cubic 放大 → Otsu 自适应二值化（THRESH_BINARY + THRESH_OTSU）。
+    /// <para>
+    /// Otsu 输出为单通道二值图，Tesseract 5 可直接解析，无需再转 BGR；
+    /// 二值化提升游戏 UI（深棕字 + 米色渐变）对比度，作为通道 B 与灰度通道融合。
+    /// </para>
+    /// </summary>
+    private Mat BuildBinaryMat(Bitmap src)
+    {
+        Mat mat = BitmapToMat(src) ?? throw new InvalidOperationException("无法将 Bitmap 转为 Mat。");
+        try
+        {
+            Mat m = mat.Clone();
+            try
+            {
+                if (m.Channels() != 1)
+                {
+                    Mat gray = ToGray(m);
+                    m.Dispose();
+                    m = gray;
+                }
+
+                if (_scale != 1.0)
+                {
+                    Mat resized = m.Resize(new OpenCvSharp.Size(0, 0), _scale, _scale, InterpolationFlags.Cubic);
+                    m.Dispose();
+                    m = resized;
+                }
+
+                Mat binary = new Mat();
+                Cv2.Threshold(m, binary, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                m.Dispose();
+                return binary;
+            }
+            catch
+            {
+                m.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            mat.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Bitmap → BGR → HSV → 取 V 通道（亮度）→ 2x Cubic 放大。
+    /// <para>
+    /// V 通道天然去色：所有彩色字在 V 通道都成深色，所有彩色背景都成浅色——
+    /// "橙黄按钮 + 深棕字"（如"日常_宝图任务.png"的"参加"）在灰度化后橙黄/深棕均成
+    /// 中等灰度（~190/~80），对比度反被冲淡；而 V 通道让按钮成近白、文字成近黑，
+    /// 对比度稳定提升，Otsu 类二值化在 V 图上对全图均稳定。
+    /// 输出与 <see cref="BuildBinaryMat"/> 同形态的单通道 Mat（调用方负责 using 释放）。
+    /// </para>
+    /// </summary>
+    private Mat BuildValueChannelMat(Bitmap src)
+    {
+        Mat mat = BitmapToMat(src) ?? throw new InvalidOperationException("无法将 Bitmap 转为 Mat。");
+        try
+        {
+            Mat m = mat.Clone();
+            try
+            {
+                // 单通道输入本身就是亮度通道（灰度），无需 HSV 转换，直接按 _scale 放大返回。
+                if (m.Channels() == 1)
+                {
+                    if (_scale != 1.0)
+                    {
+                        Mat resized = m.Resize(new OpenCvSharp.Size(0, 0), _scale, _scale, InterpolationFlags.Cubic);
+                        m.Dispose();
+                        return resized;
+                    }
+                    return m;
+                }
+
+                // 4 通道（含 alpha）先转 BGR，保证 BGR2HSV 输入形态一致。
+                if (m.Channels() == 4)
+                {
+                    Mat bgr = m.CvtColor(ColorConversionCodes.BGRA2BGR);
+                    m.Dispose();
+                    m = bgr;
+                }
+
+                // BGR → HSV → 取 V 通道（单通道 uint8）。
+                Mat hsv = m.CvtColor(ColorConversionCodes.BGR2HSV);
+                m.Dispose(); // 中间克隆已转成 HSV，立即释放 BGR 副本
+                try
+                {
+                    Mat v = new Mat();
+                    Cv2.ExtractChannel(hsv, v, 2); // V 通道（HSV 第 3 通道，coi=2）
+                    try
+                    {
+                        if (_scale != 1.0)
+                        {
+                            Mat resized = v.Resize(new OpenCvSharp.Size(0, 0), _scale, _scale, InterpolationFlags.Cubic);
+                            v.Dispose();
+                            v = resized;
+                        }
+                        return v; // 调用方负责 using 释放
+                    }
+                    catch
+                    {
+                        v.Dispose();
+                        throw;
+                    }
+                }
+                finally
+                {
+                    hsv.Dispose();
+                }
+            }
+            catch
+            {
+                m.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            mat.Dispose();
+        }
+    }
+
+    /// <summary>去重时判定"同一词"的归一化中心坐标距离阈值（0.02 ≈ 图片宽高的 2%）。</summary>
+    internal const double DedupeCenterDistanceThreshold = 0.02;
+
+    /// <summary>
+    /// 合并两个通道的词列表并按"文字内容 + 归一化中心距离"去重。
+    /// <para>
+    /// 规则：两词 Text 相同（Ordinal）且归一化中心坐标距离 ≤ <see cref="DedupeCenterDistanceThreshold"/>
+    /// 视为同一词，保留通道 A 的版本（避免通道 B 的轻微坐标偏移）。
+    /// 通道 A 为空时直接返回通道 B（Otsu 可救回灰度完全失败的样本）。
+    /// </para>
+    /// </summary>
+    internal static IReadOnlyList<RecognizedTextLine> MergeAndDedupeWords(
+        IReadOnlyList<RecognizedTextLine> wordsA,
+        IReadOnlyList<RecognizedTextLine> wordsB)
+    {
+        if (wordsA.Count == 0)
+        {
+            return wordsB;
+        }
+
+        if (wordsB.Count == 0)
+        {
+            return wordsA;
+        }
+
+        var result = new List<RecognizedTextLine>(wordsA);
+        foreach (RecognizedTextLine b in wordsB)
+        {
+            bool isDuplicate = false;
+            foreach (RecognizedTextLine a in wordsA)
+            {
+                if (string.Equals(a.Text, b.Text, StringComparison.Ordinal) &&
+                    CenterDistance(a, b) <= DedupeCenterDistanceThreshold)
+                {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+
+            if (!isDuplicate)
+            {
+                result.Add(b);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 合并三个通道的词列表并按"文字内容 + 归一化中心距离"去重（用于三通道融合）。
+    /// <para>
+    /// 规则与两路合并一致（文字相同 + 中心距离 ≤ <see cref="DedupeCenterDistanceThreshold"/> 视为同一词），
+    /// 优先级 A &gt; B &gt; C：A 命中不丢；B/C 命中且与 A 重复时保留 A 坐标；
+    /// B 命中与 C 重复时保留 B 坐标。实现上复用两路合并做两次两两合并，结果等价（A+B 先合，再与 C 合）。
+    /// 通道 A 为空时直接进入（A 空 → 返回 B），B 命中与 C 重复时走第二次两两合并，保留 B。
+    /// </para>
+    /// </summary>
+    internal static IReadOnlyList<RecognizedTextLine> MergeAndDedupeWords(
+        IReadOnlyList<RecognizedTextLine> wordsA,
+        IReadOnlyList<RecognizedTextLine> wordsB,
+        IReadOnlyList<RecognizedTextLine> wordsC)
+    {
+        IReadOnlyList<RecognizedTextLine> merged = MergeAndDedupeWords(wordsA, wordsB);
+        return MergeAndDedupeWords(merged, wordsC);
+    }
+
+    /// <summary>两词归一化中心坐标的欧氏距离。</summary>
+    private static double CenterDistance(RecognizedTextLine a, RecognizedTextLine b)
+    {
+        double dx = a.CenterX - b.CenterX;
+        double dy = a.CenterY - b.CenterY;
+        return Math.Sqrt(dx * dx + dy * dy);
     }
 
     #endregion

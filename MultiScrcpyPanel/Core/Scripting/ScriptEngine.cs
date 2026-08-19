@@ -342,7 +342,34 @@ public static class ScriptEngine
             throw new ScriptParseException(lineNo, "WAIT 缺少毫秒数");
         }
 
-        return new WaitInstruction(lineNo, ParsePositiveInt(parts[1], lineNo, "WAIT"));
+        // 单参数：WAIT <毫秒>（固定等待，向后兼容）
+        if (parts.Length == 2)
+        {
+            return new WaitInstruction(lineNo, ParsePositiveInt(parts[1], lineNo, "WAIT"));
+        }
+
+        // 双参数：WAIT <最小毫秒> <最大毫秒>（范围内随机等待）
+        int min = ParsePositiveInt(parts[1], lineNo, "WAIT 最小毫秒");
+        int max = ParsePositiveInt(parts[2], lineNo, "WAIT 最大毫秒");
+
+        if (max == 0)
+        {
+            // 显式写 0 表示固定等待（退化为 WAIT <min>）
+            return new WaitInstruction(lineNo, min);
+        }
+
+        if (max < min)
+        {
+            throw new ScriptParseException(lineNo, $"WAIT 最大毫秒({max})不能小于最小毫秒({min})");
+        }
+
+        if (max == min)
+        {
+            // 上下限相同：退化为固定等待
+            return new WaitInstruction(lineNo, min);
+        }
+
+        return new WaitInstruction(lineNo, min, max);
     }
 
     private static KeyInstruction ParseKey(string[] parts, int lineNo)
@@ -481,8 +508,19 @@ public static class ScriptEngine
                     break;
 
                 case WaitInstruction w:
-                    progress?.Report(new ScriptLogEntry(w.Line, $"WAIT {w.Ms}ms"));
-                    await Delay(w.Ms, token);
+                    if (w.MaxMs == null)
+                    {
+                        progress?.Report(new ScriptLogEntry(w.Line, $"WAIT {w.Ms}ms"));
+                        await Delay(w.Ms, token);
+                    }
+                    else
+                    {
+                        // 范围随机等待：在 [Min, Max] 内取实际毫秒，日志输出实际值便于排查。
+                        int ms = Random.Shared.Next(w.Ms, w.MaxMs.Value + 1);
+                        progress?.Report(new ScriptLogEntry(w.Line, $"WAIT {w.Ms}~{w.MaxMs.Value}ms → 等待 {ms}ms"));
+                        await Delay(ms, token);
+                    }
+
                     break;
 
                 case KeyInstruction k:
@@ -726,6 +764,7 @@ public static class ScriptEngine
         int wait = 300;
         double dx = 0, dy = 0;
         bool center = false;
+        bool stopOnFail = false;
         string? clickText = null;
 
         for (int i = 1; i < parts.Length; i++)
@@ -757,6 +796,16 @@ public static class ScriptEngine
                 case "CENTER":
                     center = true;
                     break;
+                case "ONFAIL":
+                    // ONFAIL STOP：重试耗尽仍未命中时停止整个脚本（默认继续下一步）。
+                    if (i + 1 >= parts.Length || parts[i + 1].ToUpperInvariant() != "STOP")
+                    {
+                        throw new ScriptParseException(lineNo, "OCR 的 ONFAIL 需要接 STOP（当前仅支持 ONFAIL STOP）");
+                    }
+
+                    stopOnFail = true;
+                    i++;
+                    break;
                 default:
                     images.Add(parts[i]);
                     break;
@@ -769,7 +818,7 @@ public static class ScriptEngine
         }
 
         // 现在只取第一张作为模板（其余忽略，运行时给出提示）。
-        return new OcrInstruction(lineNo, images, maxErr, timeout, retry, wait, dx, dy, center, clickText);
+        return new OcrInstruction(lineNo, images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail);
     }
 
     /// <summary>
@@ -931,7 +980,12 @@ public static class ScriptEngine
             if (frame == null)
             {
                 progress?.Report(new ScriptLogEntry(o.Line, "OCR 跳过：当前无帧"));
-                if (!ShouldRetryOcr(o, ref deadline, ref attempt)) return;
+                if (!ShouldRetryOcr(o, ref deadline, ref attempt))
+                {
+                    HandleOcrRetryExhausted(o, templateName);
+                    return;
+                }
+
                 await Delay(o.WaitMs, token);
                 continue;
             }
@@ -947,7 +1001,12 @@ public static class ScriptEngine
                 {
                     progress?.Report(new ScriptLogEntry(o.Line,
                         $"OCR 模板缺失：{templateName}；adb截图{frame.Width}x{frame.Height}"));
-                    if (!ShouldRetryOcr(o, ref deadline, ref attempt)) return;
+                    if (!ShouldRetryOcr(o, ref deadline, ref attempt))
+                    {
+                        HandleOcrRetryExhausted(o, templateName);
+                        return;
+                    }
+
                     await Delay(o.WaitMs, token);
                     continue;
                 }
@@ -968,7 +1027,12 @@ public static class ScriptEngine
                     var best = matcher.Match(frame, tpl, 1.0);
                     progress?.Report(new ScriptLogEntry(o.Line,
                         $"OCR 未命中：{Path.GetFileName(templateName)}(最佳相似度{best?.Score ?? 0:F2})；adb截图{frame.Width}x{frame.Height}"));
-                    if (!ShouldRetryOcr(o, ref deadline, ref attempt)) return;
+                    if (!ShouldRetryOcr(o, ref deadline, ref attempt))
+                    {
+                        HandleOcrRetryExhausted(o, templateName);
+                        return;
+                    }
+
                     await Delay(o.WaitMs, token);
                     continue;
                 }
@@ -998,6 +1062,30 @@ public static class ScriptEngine
                     // 模板在截图中占 (Nx±HalfW, Ny±HalfH)，故文字最终归一化坐标：
                     double fx = (m.Nx - m.HalfW) + off.Value.tx * (2.0 * m.HalfW);
                     double fy = (m.Ny - m.HalfH) + off.Value.ty * (2.0 * m.HalfH);
+
+                    // 诊断日志：完整记录模板命中框 + 文字换算结果，便于定位"坐标算错/模板选错"。
+                    // 正常路径下只多打一行（每次 OCR 命中一行），开销可忽略。
+                    progress?.Report(new ScriptLogEntry(o.Line,
+                        $"OCR 诊断 模板{m.HalfW:F3}x{m.HalfH:F3}@{m.Nx:F3},{m.Ny:F3} 文字{off.Value.tx:F3},{off.Value.ty:F3}→fx={fx:F3},{fy:F3} frame{frame.Width}x{frame.Height}"));
+
+                    // 范围校验：文字点必须落在帧内 [0,1]。越界（非有限数或超出 [0,1]）说明
+                    // 模板命中位置可疑（曾出现 Nx 偏离 0.466 导致 fx=0.697 落到右 70%），
+                    // 记录警告并以 NaN 标记走降级路径点击模板中心，避免误点击。
+                    if (!double.IsFinite(fx) || !double.IsFinite(fy) || fx < 0.0 || fx > 1.0 || fy < 0.0 || fy > 1.0)
+                    {
+                        progress?.Report(new ScriptLogEntry(o.Line,
+                            $"OCR 警告 文字点({fx:F3},{fy:F3})越出帧范围[0,1]，模板命中({m.Nx:F3},{m.Ny:F3})可能异常，降级点击模板中心：{templateName}({m.Score:F2})"));
+                        fx = double.NaN;
+                        fy = double.NaN;
+                    }
+
+                    if (double.IsNaN(fx) || double.IsNaN(fy))
+                    {
+                        // 降级路径：点击模板命中框中心（与"模板内文字未找到"走同一路径）。
+                        await ClickInRect(o, sink, m.Nx - m.HalfW, m.Ny - m.HalfH, m.Nx + m.HalfW, m.Ny + m.HalfH,
+                            vw, vh, progress, $"OCR 模板命中 {templateName}({m.Score:F2})（文字越界降级）");
+                        return;
+                    }
 
                     // 高亮文字命中点（以文字点为中心的小框）。
                     const double hh = 0.012;
@@ -1061,7 +1149,27 @@ public static class ScriptEngine
             (RecognizedTextLine? box, double err) = TextMatcher.FindBestSpan(text, words);
             if (box != null && err <= maxErr)
             {
-                result = (box.CenterX, box.CenterY);
+                double tx = box.CenterX;
+                double ty = box.CenterY;
+
+                // 合并中心验证：FindBestSpan 把连续词合并为包围盒。若合并中心相对首词中心
+                // 偏差过大（|Δx|>0.2 或 |Δy|>0.2），说明可能误合并到不相关的词（如跨整行），改用
+                // 首词中心（落在真正的"参加"字上）并告警。
+                RecognizedTextLine? first = FindSpanFirstWord(words, box);
+                if (first != null)
+                {
+                    double dx = Math.Abs(tx - first.CenterX);
+                    double dy = Math.Abs(ty - first.CenterY);
+                    if (dx > 0.2 || dy > 0.2)
+                    {
+                        progress?.Report(new ScriptLogEntry(line,
+                            $"OCR 模板[{templateName}] 文字\"{text}\"合并中心({tx:F3},{ty:F3})与首词({first.CenterX:F3},{first.CenterY:F3})偏差过大(Δx={dx:F3},Δy={dy:F3})，改用首词中心"));
+                        tx = first.CenterX;
+                        ty = first.CenterY;
+                    }
+                }
+
+                result = (tx, ty);
             }
             else
             {
@@ -1082,34 +1190,79 @@ public static class ScriptEngine
         return result;
     }
 
-    /// <summary>在指定归一化矩形区域内点击（CENTER 取中心，否则随机）。</summary>
-    private static async Task ClickInRect(OcrInstruction o, IScriptDeviceSink sink,
-        double x1, double y1, double x2, double y2, int vw, int vh,
-        IProgress<ScriptLogEntry>? progress, string logPrefix)
-    {
-        double px, py;
-        if (o.UseCenter)
+        /// <summary>在指定归一化矩形区域内点击（CENTER 取中心，否则随机）。</summary>
+        private static async Task ClickInRect(OcrInstruction o, IScriptDeviceSink sink,
+            double x1, double y1, double x2, double y2, int vw, int vh,
+            IProgress<ScriptLogEntry>? progress, string logPrefix)
         {
-            px = (x1 + x2) / 2.0;
-            py = (y1 + y2) / 2.0;
-        }
-        else
-        {
-            // 区域内随机点（避免每次点同一像素被反作弊）
-            px = x1 + (x2 - x1) * Random.Shared.NextDouble();
-            py = y1 + (y2 - y1) * Random.Shared.NextDouble();
+            // 防御：任何坐标非有限/越界时退化为帧中心（NaN 进入 ResolveCoord 会导致
+            // 整数溢出或下界 0 抖动）。正常调用方会在调用前主动走降级路径，这里是兜底。
+            // 注意：不夹 x1/x2/y1/y2 到 [0,1]——"模板命中框越界"本身有诊断意义，
+            // 且最终的 px/py 已有 Clamp 保护；提前夹会偏移矩形中心（例如
+            // 矩形 [0.89, 0.40, 1.01, 0.60] 被夹后中心变成 0.945 而非 0.95）。
+            if (!double.IsFinite(x1) || !double.IsFinite(y1) || !double.IsFinite(x2) || !double.IsFinite(y2))
+            {
+                x1 = 0.0; y1 = 0.0; x2 = 1.0; y2 = 1.0;
+            }
+
+            double px, py;
+            if (o.UseCenter)
+            {
+                px = (x1 + x2) / 2.0;
+                py = (y1 + y2) / 2.0;
+            }
+            else
+            {
+                // 区域内随机点（避免每次点同一像素被反作弊）
+                px = x1 + (x2 - x1) * Random.Shared.NextDouble();
+                py = y1 + (y2 - y1) * Random.Shared.NextDouble();
+            }
+
+            px = Math.Clamp(px + o.Dx, 0.0, 1.0);
+            py = Math.Clamp(py + o.Dy, 0.0, 1.0);
+            int ix = ResolveCoord(px, vw);
+            int iy = ResolveCoord(py, vh);
+
+            sink.TouchDown(ix, iy);
+            progress?.Report(new ScriptLogEntry(o.Line, $"{logPrefix}，点击 ({ix},{iy})"));
+            await Delay(50, default);
+            sink.TouchUp(ix, iy);
         }
 
-        px = Math.Clamp(px + o.Dx, 0.0, 1.0);
-        py = Math.Clamp(py + o.Dy, 0.0, 1.0);
-        int ix = ResolveCoord(px, vw);
-        int iy = ResolveCoord(py, vh);
+        /// <summary>
+        /// 找出合并包围盒内"阅读顺序第一个"的词（Y 升序、X 升序；词中心需落在盒内）。
+        /// <para>
+        /// 用于 <see cref="TextMatcher.FindBestSpan"/> 合并中心验证：合并盒内的首词即为
+        /// 用户实际点击的目标（如"参加"中的"参"），其位置应与合并中心接近。
+        /// </para>
+        /// </summary>
+        private static RecognizedTextLine? FindSpanFirstWord(IReadOnlyList<RecognizedTextLine> words, RecognizedTextLine span)
+        {
+            const double eps = 1e-6;
+            RecognizedTextLine? first = null;
+            foreach (RecognizedTextLine w in words)
+            {
+                if (string.IsNullOrWhiteSpace(w.Text))
+                {
+                    continue;
+                }
 
-        sink.TouchDown(ix, iy);
-        progress?.Report(new ScriptLogEntry(o.Line, $"{logPrefix}，点击 ({ix},{iy})"));
-        await Delay(50, default);
-        sink.TouchUp(ix, iy);
-    }
+                if (w.CenterX < span.X - eps || w.CenterX > span.Right + eps ||
+                    w.CenterY < span.Y - eps || w.CenterY > span.Bottom + eps)
+                {
+                    continue;
+                }
+
+                if (first == null ||
+                    w.Y < first.Y - eps ||
+                    (Math.Abs(w.Y - first.Y) <= eps && w.X < first.X - eps))
+                {
+                    first = w;
+                }
+            }
+
+            return first;
+        }
 
     private static bool ShouldRetryOcr(OcrInstruction o, ref int deadline, ref int attempt)
     {
@@ -1119,6 +1272,18 @@ public static class ScriptEngine
         }
 
         return attempt < o.Retry;
+    }
+
+    /// <summary>
+    /// OCR 重试耗尽后的收尾：若指令带 <c>ONFAIL STOP</c>，抛 <see cref="ScriptFailStopException"/>
+    /// 停止整个脚本；否则什么都不做（返回后调用方继续执行下一步，向后兼容）。
+    /// </summary>
+    private static void HandleOcrRetryExhausted(OcrInstruction o, string templateName)
+    {
+        if (o.StopOnFail)
+        {
+            throw new ScriptFailStopException(o.Line, $"OCR 未命中 {templateName}，已达重试上限");
+        }
     }
 
     // ---- OCR_TEXT 指令：真实文字识别 + 相对偏移点击 ----
@@ -1313,7 +1478,11 @@ public sealed class FindInstruction : ScriptInstruction
 /// 未命中时按 TIMEOUT/RETRY 重试。
 /// </para>
 /// <para>
-/// 语法：OCR &lt;模板图&gt; [TEXT “文字”] [MAXERR 0.15] [TIMEOUT 0] [RETRY 1] [WAIT 300] [DX n] [DY n] [CENTER]
+/// 语法：OCR &lt;模板图&gt; [TEXT “文字”] [MAXERR 0.15] [TIMEOUT 0] [RETRY 1] [WAIT 300] [DX n] [DY n] [CENTER] [ONFAIL STOP]
+/// </para>
+/// <para>
+/// <b>ONFAIL STOP</b>：重试耗尽仍未命中时抛 <see cref="ScriptFailStopException"/> 停止整个脚本；
+/// 未指定则保持原有行为（继续执行下一步）。
 /// </para>
 /// </summary>
 public sealed class OcrInstruction : ScriptInstruction
@@ -1331,8 +1500,10 @@ public sealed class OcrInstruction : ScriptInstruction
     public double Dx { get; }
     public double Dy { get; }
     public bool UseCenter { get; }
+    /// <summary>ONFAIL STOP：重试耗尽仍未命中时停止整个脚本（默认 false = 继续下一步）。</summary>
+    public bool StopOnFail { get; }
 
-    public OcrInstruction(int line, List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null)
+    public OcrInstruction(int line, List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false)
         : base(line)
     {
         Images = images;
@@ -1344,6 +1515,7 @@ public sealed class OcrInstruction : ScriptInstruction
         Dx = dx;
         Dy = dy;
         UseCenter = useCenter;
+        StopOnFail = stopOnFail;
     }
 }
 
@@ -1435,7 +1607,17 @@ public sealed class SwipeInstruction : ScriptInstruction
 public sealed class WaitInstruction : ScriptInstruction
 {
     public int Ms { get; }
-    public WaitInstruction(int line, int ms) : base(line) => Ms = ms;
+    /// <summary>
+    /// 范围随机等待的上限毫秒；null 表示固定等待（<c>WAIT &lt;毫秒&gt;</c>）。
+    /// 非 null 时实际等待 <see cref="Ms"/>~<see cref="MaxMs"/> 区间内的随机值。
+    /// </summary>
+    public int? MaxMs { get; }
+
+    public WaitInstruction(int line, int ms, int? maxMs = null) : base(line)
+    {
+        Ms = ms;
+        MaxMs = maxMs;
+    }
 }
 
 public sealed class KeyInstruction : ScriptInstruction
@@ -1475,6 +1657,23 @@ public sealed class ScriptParseException : Exception
 {
     public int Line { get; }
     public ScriptParseException(int line, string message) : base($"第 {line} 行：{message}")
+    {
+        Line = line;
+    }
+}
+
+/// <summary>
+/// OCR 指令 <c>ONFAIL STOP</c>：重试耗尽仍未命中时抛出，表示"脚本因 OCR 失败而停止"。
+/// <para>
+/// 与 <see cref="OperationCanceledException"/>（用户手动停止）语义不同，调用方应单独捕获并提示。
+/// </para>
+/// </summary>
+public sealed class ScriptFailStopException : Exception
+{
+    /// <summary>触发停止的指令行号。</summary>
+    public int Line { get; }
+
+    public ScriptFailStopException(int line, string message) : base($"第 {line} 行：{message}")
     {
         Line = line;
     }

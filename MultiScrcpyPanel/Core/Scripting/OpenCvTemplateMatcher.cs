@@ -18,16 +18,17 @@ namespace MultiScrcpy.Core.Scripting;
 ///    并由 <c>alpha</c> 经 <c>Threshold(alpha, 50, 255, Binary)</c> 得到二值 <c>mask</c>，
 ///    直接传入 <c>MatchTemplate</c>——仅非透明像素参与匹配，忽略镂空/半透明/抗锯齿背景，
 ///    与 OcrViewer 行为完全一致（金标准参考图对达 0.99+）。不再使用裁剪 bounding box 的方案；
-/// 4) <b>多尺度搜索</b>：0.6–1.4 按 0.05 步进，模板缩放用 Linear，mask 缩放用 Nearest；
+/// 4) <b>多尺度搜索</b>：0.85–1.15 按 0.05 步进，模板缩放用 Linear，mask 缩放用 Nearest；
 /// 5) <b>CCoeffNormed</b> + <c>MinMaxLoc</c> 取 maxVal / maxLoc；并对 maxVal 做有限值防御。
 /// </para>
 /// </summary>
 internal sealed class OpenCvTemplateMatcher : ITemplateMatcher
 {
-    // 多尺度搜索范围：对齐 OcrViewer 的 0.6–1.4（步进 0.05，约 17 个尺度）。
-    // 视频流与手机原图分辨率接近 1:1，此窄带已足够覆盖不同机型分辨率差异。
-    private const double ScaleMin = 0.6;
-    private const double ScaleMax = 1.4001;
+    // 多尺度搜索范围：0.85–1.15（步进 0.05，共 7 个尺度）。
+    // 视频流与手机原图分辨率接近 1:1，此窄带已足够覆盖不同机型分辨率差异；
+    // 去掉 0.6–0.85 与 1.15–1.4 极端尺度以避免非 1.0 尺度上的伪命中（曾导致 Nx 偏离 0.466）。
+    private const double ScaleMin = 0.85;
+    private const double ScaleMax = 1.1501;
     private const double ScaleStep = 0.05;
 
     // 透明像素判定阈值（与 OcrViewer Vision.Match 的 50 一致）。
@@ -55,8 +56,9 @@ internal sealed class OpenCvTemplateMatcher : ITemplateMatcher
         IsAvailable = ok;
     }
 
-    // NMS 去重阈值：同一张图标在不同尺度可能都被命中，IoU 较高时合并。
-    private const double IouThreshold = 0.5;
+    // NMS 去重阈值：从 0.5 收紧到 0.3，避免轻微偏移/不同尺度的重叠候选都被保留导致
+    // 最优位置被错误候选挤掉（曾出现 score=1.00 命中 Nx=0.601 的错误位置）。
+    private const double IouThreshold = 0.3;
 
     /// <inheritdoc />
     public TemplateMatch? Match(Bitmap frame, Bitmap template, double maxError)
@@ -163,11 +165,28 @@ internal sealed class OpenCvTemplateMatcher : ITemplateMatcher
         for (int i = 0; i < count; i++)
         {
             RawCandidate c = kept[i];
+
+            // 防御性位置校验：候选框必须完整落在帧内。正常情况下 MatchTemplate 输出坐标
+            // 自带该约束（X ∈ [0, fw-tplW], Y ∈ [0, fh-tplH]），但若上游误用（如手工构造
+            // 候选）需拦截，避免后续归一化坐标/点击越界。
+            if (c.X < 0 || c.Y < 0 || c.X + c.W > fw || c.Y + c.H > fh)
+            {
+                continue;
+            }
+
             double nx = (c.X + c.W / 2.0) / fw;
             double ny = (c.Y + c.H / 2.0) / fh;
             double halfW = (c.W / 2.0) / fw;
             double halfH = (c.H / 2.0) / fh;
             results.Add(new TemplateMatch(nx, ny, halfW, halfH, c.Score));
+        }
+
+        // 诊断：仅在最高分不"近 1"时记录候选数，便于排查"score=1.00 但位置错"的回归。
+        // 走 Debug 通道，避免污染普通日志（普通路径只在异常时打）。
+        if (results.Count > 0 && results[0].Score < 0.999)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[TemplateMatcher] {candidates.Count} 个候选，NMS 保留 {kept.Count} 个（IoU={IouThreshold:F2}）；最佳 score={results[0].Score:F4} loc=({results[0].Nx:F3},{results[0].Ny:F3})");
         }
 
         return results;

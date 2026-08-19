@@ -429,6 +429,11 @@ public sealed class ScriptEditorForm : Form
         var center = new CheckBox { Text = "点击命中框中心（CENTER）；不勾则在区域内随机取点", AutoSize = true, Checked = o.UseCenter };
         center.CheckedChanged += (_, _) => { o.UseCenter = center.Checked; UpdateSelectedLabel(o); };
         AddRow(center);
+
+        AddRow(Label("失败后行为：勾选后，重试(RETRY 次数 + WAIT 间隔)耗尽仍未命中则停止整个脚本；不勾选则失败后继续下一步。识别成功均继续下一步。"));
+        var stopOnFail = new CheckBox { Text = "失败后停止脚本（ONFAIL STOP）", AutoSize = true, Checked = o.StopOnFail };
+        stopOnFail.CheckedChanged += (_, _) => { o.StopOnFail = stopOnFail.Checked; UpdateSelectedLabel(o); };
+        AddRow(stopOnFail);
     }
 
     private void BuildTap(TapStep t)
@@ -558,10 +563,20 @@ public sealed class ScriptEditorForm : Form
 
     private void BuildWait(WaitStep w)
     {
-        AddRow(Label("等待(ms)："));
+        AddRow(Label("最小等待(ms)（固定等待时即为此值）："));
         var ms = Num(w.Ms, 0, 600000, 50);
         Bind(ms, v => w.Ms = (int)v, w);
         AddRow(ms);
+
+        AddRow(Label("最大等待(ms)（留 0 = 固定等待；>最小值则在 [最小,最大] 区间内随机等待，用于模拟真人操作间隔）："));
+        var maxMs = Num(w.MaxMs ?? 0, 0, 600000, 50);
+        maxMs.ValueChanged += (_, _) =>
+        {
+            int val = (int)maxMs.Value;
+            w.MaxMs = val <= 0 ? null : val;
+            UpdateSelectedLabel(w);
+        };
+        AddRow(maxMs);
     }
 
     private void BuildKey(KeyStep k)
