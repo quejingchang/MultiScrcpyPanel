@@ -45,8 +45,8 @@ public sealed class ScriptEditorForm : Form
         _captureRequest = captureRequest;
         Text = "脚本编排器";
         Size = new Size(960, 640);
-        StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(720, 480);
+        StartPosition = FormStartPosition.CenterScreen; // 兜底；实际由父窗体调用 MainForm.CenterChildOnMain 居中于主窗口
+        MinimumSize = new Size(1440, 960);
 
         BuildToolbar();
         BuildLayout();
@@ -434,6 +434,19 @@ public sealed class ScriptEditorForm : Form
         var stopOnFail = new CheckBox { Text = "失败后停止脚本（ONFAIL STOP）", AutoSize = true, Checked = o.StopOnFail };
         stopOnFail.CheckedChanged += (_, _) => { o.StopOnFail = stopOnFail.Checked; UpdateSelectedLabel(o); };
         AddRow(stopOnFail);
+
+        AddRow(Label("无限重试（INFINITE）：勾选后只有匹配成功才进入下一步；不匹配则一直重试直到手动停止。忽略 RETRY/TIMEOUT，请务必设置 WAIT 间隔避免空转（与“失败停止”互斥）。"));
+        var infinite = new CheckBox { Text = "无限重试（仅成功才继续，INFINITE）", AutoSize = true, Checked = o.Infinite };
+        infinite.CheckedChanged += (_, _) =>
+        {
+            o.Infinite = infinite.Checked;
+            rt.Enabled = !infinite.Checked;
+            to.Enabled = !infinite.Checked;
+            UpdateSelectedLabel(o);
+        };
+        rt.Enabled = !o.Infinite;
+        to.Enabled = !o.Infinite;
+        AddRow(infinite);
     }
 
     private void BuildTap(TapStep t)
@@ -539,6 +552,19 @@ public sealed class ScriptEditorForm : Form
         var caseBox = new CheckBox { Text = "区分大小写（CASE）", AutoSize = true, Checked = o.CaseSensitive };
         caseBox.CheckedChanged += (_, _) => { o.CaseSensitive = caseBox.Checked; UpdateSelectedLabel(o); };
         AddRow(caseBox);
+
+        AddRow(Label("无限重试（INFINITE）：勾选后只有匹配成功才进入下一步；不匹配则一直重试直到手动停止。忽略 RETRY/TIMEOUT，请务必设置 WAIT 间隔避免空转。"));
+        var infinite = new CheckBox { Text = "无限重试（仅成功才继续，INFINITE）", AutoSize = true, Checked = o.Infinite };
+        infinite.CheckedChanged += (_, _) =>
+        {
+            o.Infinite = infinite.Checked;
+            rt.Enabled = !infinite.Checked;
+            to.Enabled = !infinite.Checked;
+            UpdateSelectedLabel(o);
+        };
+        rt.Enabled = !o.Infinite;
+        to.Enabled = !o.Infinite;
+        AddRow(infinite);
     }
 
     private void BuildSwipe(SwipeStep s)
@@ -664,7 +690,7 @@ public sealed class ScriptEditorForm : Form
             Title = "打开脚本",
             InitialDirectory = Directory.Exists(_scriptsDir) ? _scriptsDir : string.Empty
         };
-        if (dlg.ShowDialog(this) != DialogResult.OK)
+        if (dlg.ShowDialog((IWin32Window?)MainForm.Instance ?? this) != DialogResult.OK)
         {
             return;
         }
@@ -697,7 +723,7 @@ public sealed class ScriptEditorForm : Form
                 FileName = path == null ? "新脚本.scr" : Path.GetFileName(path),
                 InitialDirectory = Directory.Exists(_scriptsDir) ? _scriptsDir : string.Empty
             };
-            if (dlg.ShowDialog(this) != DialogResult.OK)
+            if (dlg.ShowDialog((IWin32Window?)MainForm.Instance ?? this) != DialogResult.OK)
             {
                 return;
             }

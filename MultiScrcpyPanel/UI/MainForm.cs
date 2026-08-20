@@ -50,6 +50,9 @@ public sealed class MainForm : Form
     private readonly ToolStripLabel _summaryLabel = new("在线 0 / 离线 0 / 待授权 0");
     private ScriptPanelForm? _scriptPanel;
 
+    /// <summary>当前主窗体单例引用，供各子窗体将其居中于主窗口。</summary>
+    public static MainForm? Instance { get; private set; }
+
     private readonly Panel _content = new();
     private readonly FlowLayoutPanel _flow = new();
 
@@ -72,6 +75,7 @@ public sealed class MainForm : Form
     public MainForm(AppConfig cfg, string ffmpegVersion = "")
     {
         _cfg = cfg ?? throw new ArgumentNullException(nameof(cfg));
+        Instance = this;
 
         // 窗口图标：使用程序集关联图标（由 csproj ApplicationIcon 注入）
         try
@@ -137,6 +141,40 @@ public sealed class MainForm : Form
         }
 
         this.SafePost(() => _toast.Show(this, text, level));
+    }
+
+    /// <summary>
+    /// 将子窗体定位到主窗口的正中心。覆盖 <see cref="Form.StartPosition"/>，
+    /// 通过 <see cref="Form.Load"/> 事件在子窗体尺寸（含 DPI 缩放）确定后再定位，
+    /// 保证任何子窗口被打开时都居中于主窗口，且不会出现闪跳。
+    /// </summary>
+    public static void CenterChildOnMain(Form child)
+    {
+        if (child == null)
+        {
+            throw new ArgumentNullException(nameof(child));
+        }
+
+        var main = Instance;
+        if (main == null || main.IsDisposed)
+        {
+            child.StartPosition = FormStartPosition.CenterScreen;
+            return;
+        }
+
+        child.StartPosition = FormStartPosition.Manual;
+        child.Load += (_, _) =>
+        {
+            if (main.IsDisposed)
+            {
+                return;
+            }
+
+            var b = main.Bounds;
+            child.Location = new Point(
+                b.X + (b.Width - child.Width) / 2,
+                b.Y + (b.Height - child.Height) / 2);
+        };
     }
 
     /// <summary>写入状态栏文本。</summary>
@@ -641,9 +679,9 @@ public sealed class MainForm : Form
         {
             _scriptPanel = new ScriptPanelForm(_manager, _cards, _cfg, SetStatus, SetErrorStatus)
             {
-                Owner = this,
-                StartPosition = FormStartPosition.CenterParent
+                Owner = this
             };
+            CenterChildOnMain(_scriptPanel);
             _scriptPanel.FormClosed += (_, _) => _scriptPanel = null;
         }
 

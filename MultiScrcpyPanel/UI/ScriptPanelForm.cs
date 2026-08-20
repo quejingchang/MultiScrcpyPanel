@@ -221,7 +221,7 @@ public sealed class ScriptPanelForm : Form
                 Title = "选择脚本文件"
             };
 
-            if (dlg.ShowDialog(this) == DialogResult.OK)
+            if (dlg.ShowDialog((IWin32Window?)MainForm.Instance ?? this) == DialogResult.OK)
             {
                 if (!_scriptBox.Items.Contains(dlg.FileName))
                 {
@@ -358,12 +358,12 @@ public sealed class ScriptPanelForm : Form
 
     private void OnOpenEditor(object? sender, EventArgs e)
     {
-        // 向上回溯 Owner 链，让编辑器始终居中于最顶层主窗口（而非本脚本面板）。
+        // 让编辑器始终居中于主窗口（而非本脚本面板）。
         var editor = new ScriptEditorForm(captureRequest: CaptureCoordinate)
         {
-            StartPosition = FormStartPosition.CenterParent,
-            Owner = TopLevelOwner(this)
+            Owner = MainForm.Instance
         };
+        MainForm.CenterChildOnMain(editor);
         // 关闭后刷新脚本下拉，并取消可能仍在等待的「坐标录取」
         editor.FormClosed += (_, _) =>
         {
@@ -411,18 +411,6 @@ public sealed class ScriptPanelForm : Form
             onCaptured(nx, ny);
         });
         Log($"请在「{serial}」的设备画面上点击一次以录取坐标…");
-    }
-
-    /// <summary>沿 Owner 链向上找到最顶层窗体（主窗口），使子窗口始终居中于主窗口而非中间层父窗体。</summary>
-    private static Form TopLevelOwner(Form form)
-    {
-        Form top = form;
-        while (top.Owner is { } owner)
-        {
-            top = owner;
-        }
-
-        return top;
     }
 
     // ---- 辅助 ----
