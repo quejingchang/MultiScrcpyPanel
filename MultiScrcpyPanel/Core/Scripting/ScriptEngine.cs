@@ -765,6 +765,7 @@ public static class ScriptEngine
         double dx = 0, dy = 0;
         bool center = false;
         bool stopOnFail = false;
+        bool infinite = false;
         string? clickText = null;
 
         for (int i = 1; i < parts.Length; i++)
@@ -806,6 +807,9 @@ public static class ScriptEngine
                     stopOnFail = true;
                     i++;
                     break;
+                case "INFINITE":
+                    infinite = true;
+                    break;
                 default:
                     images.Add(parts[i]);
                     break;
@@ -817,8 +821,13 @@ public static class ScriptEngine
             throw new ScriptParseException(lineNo, "OCR 至少需要一张图片");
         }
 
+        if (infinite && stopOnFail)
+        {
+            throw new ScriptParseException(lineNo, "OCR 的 INFINITE 与 ONFAIL STOP 互斥（无限重试永不会“耗尽”，无需失败停止）");
+        }
+
         // 现在只取第一张作为模板（其余忽略，运行时给出提示）。
-        return new OcrInstruction(lineNo, images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail);
+        return new OcrInstruction(lineNo, images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail, infinite);
     }
 
     /// <summary>
@@ -867,6 +876,7 @@ public static class ScriptEngine
         int wait = 300;
         double dx = 0, dy = 0;
         bool caseSensitive = false;
+        bool infinite = false;
 
         for (int i = 0; i < parts.Length; i++)
         {
@@ -896,12 +906,15 @@ public static class ScriptEngine
                 case "CASE":
                     caseSensitive = true;
                     break;
+                case "INFINITE":
+                    infinite = true;
+                    break;
                 default:
                     throw new ScriptParseException(lineNo, $"OCR_TEXT 未知参数：{parts[i]}");
             }
         }
 
-        return new OcrTextInstruction(lineNo, text, anchor, dx, dy, maxErr, timeout, retry, wait, caseSensitive);
+        return new OcrTextInstruction(lineNo, text, anchor, dx, dy, maxErr, timeout, retry, wait, caseSensitive, infinite);
     }
 
     private static (string Text, int RestStart) ExtractOcrTextBody(string line, int lineNo)
@@ -1266,6 +1279,13 @@ public static class ScriptEngine
 
     private static bool ShouldRetryOcr(OcrInstruction o, ref int deadline, ref int attempt)
     {
+        if (o.Infinite)
+        {
+            // 无限重试：只有匹配成功才会 return 进入下一步；否则一直重试，
+            // 直到用户在 UI 手动停止（cancellation 在循环开头抛异常退出）。
+            return true;
+        }
+
         if (o.TimeoutMs > 0)
         {
             return Environment.TickCount < deadline;
@@ -1369,6 +1389,11 @@ public static class ScriptEngine
 
     private static bool ShouldRetryOcrText(OcrTextInstruction o, ref int deadline, ref int attempt)
     {
+        if (o.Infinite)
+        {
+            return true;
+        }
+
         if (o.TimeoutMs > 0)
         {
             return Environment.TickCount < deadline;
@@ -1478,11 +1503,15 @@ public sealed class FindInstruction : ScriptInstruction
 /// 未命中时按 TIMEOUT/RETRY 重试。
 /// </para>
 /// <para>
-/// 语法：OCR &lt;模板图&gt; [TEXT “文字”] [MAXERR 0.15] [TIMEOUT 0] [RETRY 1] [WAIT 300] [DX n] [DY n] [CENTER] [ONFAIL STOP]
+/// 语法：OCR &lt;模板图&gt; [TEXT “文字”] [MAXERR 0.15] [TIMEOUT 0] [RETRY 1] [WAIT 300] [DX n] [DY n] [CENTER] [ONFAIL STOP] [INFINITE]
 /// </para>
 /// <para>
 /// <b>ONFAIL STOP</b>：重试耗尽仍未命中时抛 <see cref="ScriptFailStopException"/> 停止整个脚本；
 /// 未指定则保持原有行为（继续执行下一步）。
+/// </para>
+/// <para>
+/// <b>INFINITE</b>：无限重试，只有匹配成功才进入下一步；不匹配则一直重试（按 WAIT 间隔），
+/// 直到用户在 UI 手动停止。与 ONFAIL STOP 互斥（无限重试永不会“耗尽”）。
 /// </para>
 /// </summary>
 public sealed class OcrInstruction : ScriptInstruction
@@ -1502,8 +1531,10 @@ public sealed class OcrInstruction : ScriptInstruction
     public bool UseCenter { get; }
     /// <summary>ONFAIL STOP：重试耗尽仍未命中时停止整个脚本（默认 false = 继续下一步）。</summary>
     public bool StopOnFail { get; }
+    /// <summary>INFINITE：无限重试，只有匹配成功才进入下一步；不匹配则一直重试，直到用户手动停止（cancellation）。</summary>
+    public bool Infinite { get; }
 
-    public OcrInstruction(int line, List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false)
+    public OcrInstruction(int line, List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false, bool infinite = false)
         : base(line)
     {
         Images = images;
@@ -1516,6 +1547,7 @@ public sealed class OcrInstruction : ScriptInstruction
         Dy = dy;
         UseCenter = useCenter;
         StopOnFail = stopOnFail;
+        Infinite = infinite;
     }
 }
 
@@ -1523,7 +1555,10 @@ public sealed class OcrInstruction : ScriptInstruction
 /// OCR_TEXT 指令：真实文字识别，找到目标文本后按其包围盒锚点 + 偏移点击。
 /// <para>
 /// 语法：OCR_TEXT "文字" [ANCHOR RIGHT] [DX 0.05] [DY 0] [MAXERR 0.2]
-///        [TIMEOUT 0] [RETRY 1] [WAIT 300] [CASE]
+///        [TIMEOUT 0] [RETRY 1] [WAIT 300] [CASE] [INFINITE]
+/// </para>
+/// <para>
+/// <b>INFINITE</b>：无限重试，只有匹配成功才进入下一步；不匹配则一直重试直到用户手动停止。
 /// </para>
 /// </summary>
 public sealed class OcrTextInstruction : ScriptInstruction
@@ -1537,9 +1572,11 @@ public sealed class OcrTextInstruction : ScriptInstruction
     public int Retry { get; }
     public int WaitMs { get; }
     public bool CaseSensitive { get; }
+    /// <summary>INFINITE：无限重试，只有匹配成功才进入下一步。</summary>
+    public bool Infinite { get; }
 
     public OcrTextInstruction(int line, string text, OcrTextAnchor anchor, double dx, double dy,
-        double maxError, int timeoutMs, int retry, int waitMs, bool caseSensitive)
+        double maxError, int timeoutMs, int retry, int waitMs, bool caseSensitive, bool infinite = false)
         : base(line)
     {
         Text = text;
@@ -1551,6 +1588,7 @@ public sealed class OcrTextInstruction : ScriptInstruction
         Retry = retry;
         WaitMs = waitMs;
         CaseSensitive = caseSensitive;
+        Infinite = infinite;
     }
 }
 

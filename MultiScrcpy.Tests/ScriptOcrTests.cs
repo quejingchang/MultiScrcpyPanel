@@ -393,4 +393,88 @@ public class ScriptOcrTests
         Assert.Equal(2, sink.Calls.Count(c => c.StartsWith("DOWN")));
         Assert.Contains("DOWN 50,100", sink.Calls);
     }
+
+    // ---- INFINITE：无限重试，只有匹配成功才进入下一步 ----
+
+    [Fact]
+    public void 解析_OCR_INFINITE_置Infinite为true()
+    {
+        Assert.True(ScriptEngine.TryParse("OCR a.png INFINITE", "t", out ScriptProgram? p, out _));
+        var ocr = Assert.IsType<OcrInstruction>(p!.Instructions[0]);
+        Assert.True(ocr.Infinite);
+        Assert.False(ocr.StopOnFail);
+    }
+
+    [Fact]
+    public void 解析_OCR_TEXT_INFINITE_置Infinite为true()
+    {
+        Assert.True(ScriptEngine.TryParse("OCR_TEXT \"参加\" INFINITE", "t", out ScriptProgram? p, out _));
+        var ocr = Assert.IsType<OcrTextInstruction>(p!.Instructions[0]);
+        Assert.True(ocr.Infinite);
+    }
+
+    [Fact]
+    public void 解析_OCR_INFINITE_与ONFAIL_STOP互斥_报错()
+    {
+        bool ok = ScriptEngine.TryParse("OCR a.png INFINITE ONFAIL STOP", "t", out _, out List<string>? errs);
+        Assert.False(ok);
+        Assert.Contains(errs!, e => e.Contains("互斥"));
+    }
+
+    [Fact]
+    public async Task 执行_OCR_INFINITE_未命中_持续重试直到取消_不抛失败停止()
+    {
+        // INFINITE 永不命中：应一直重试，被手动取消（cancellation）时抛 OperationCanceledException，
+        // 而非 ScriptFailStopException（无限重试不会“耗尽”）。
+        var matcher = new FakeMatcher();
+        string dir = MakeTempDir();
+        WritePng(dir, "a.png");
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+
+        using var cts = new CancellationTokenSource();
+        var cancelTask = Task.Run(async () => { await Task.Delay(300); cts.Cancel(); });
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            ScriptEngine.ExecuteAsync(
+                ScriptEngine.Parse("OCR a.png INFINITE WAIT 10", "t"), sink, 100, 200, cts.Token,
+                matcher: matcher, templatesDirectory: dir));
+        await cancelTask;
+
+        Assert.DoesNotContain(sink.Calls, c => c.StartsWith("DOWN"));
+        Assert.True(sink.FrameFetches > 2, $"INFINITE 应持续重试取帧，实际 {sink.FrameFetches}");
+    }
+
+    [Fact]
+    public async Task 执行_OCR_INFINITE_命中后正常点击并继续()
+    {
+        // INFINITE 命中后立即点击并继续下一步（TAP 执行），不会无限循环。
+        var matcher = new FakeMatcher();
+        matcher.Responses.Enqueue(new TemplateMatch(0.50, 0.50, 0.10, 0.10, 0.95));
+        string dir = MakeTempDir();
+        WritePng(dir, "a.png");
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+
+        await ScriptEngine.ExecuteAsync(
+            ScriptEngine.Parse("OCR a.png INFINITE CENTER\nTAP 0.5 0.5", "t"), sink, 100, 200, default,
+            matcher: matcher, templatesDirectory: dir);
+
+        Assert.Contains("DOWN 50,100", sink.Calls); // OCR 命中（CENTER）点击
+    }
+
+    [Fact]
+    public async Task 执行_OCR_TEXT_INFINITE_未命中_持续重试直到取消()
+    {
+        // OCR_TEXT 提供不匹配的文字识别器 → 持续未命中 → INFINITE 一直重试 → 取消时抛 OperationCanceledException。
+        var sink = new FakeSink { Frame = new Bitmap(100, 200) };
+        var rec = new FakeTextRecognizer(new RecognizedTextLine("取消", 0.50, 0.50, 0.20, 0.10));
+
+        using var cts = new CancellationTokenSource();
+        var cancelTask = Task.Run(async () => { await Task.Delay(300); cts.Cancel(); });
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            ScriptEngine.ExecuteAsync(
+                ScriptEngine.Parse("OCR_TEXT \"参加\" INFINITE WAIT 10", "t"), sink, 100, 200, cts.Token,
+                textRecognizer: rec));
+        await cancelTask;
+    }
 }

@@ -209,4 +209,18 @@ public class ScriptActionModelTests
         AssertParseable(outp, "OCR 无ONFAIL");
         Assert.DoesNotContain("ONFAIL", outp);
     }
+
+    [Fact]
+    public void OCR_INFINITE_roundtrip_保留标记()
+    {
+        const string src = "OCR a.png INFINITE\n";
+        List<ScriptStep> steps = ScriptActionModel.BuildSteps(src);
+        var o = Assert.IsType<OcrStep>(steps[0]);
+        Assert.True(o.Infinite);
+        Assert.Contains("无限重试", o.Summary);
+
+        string outp = RoundTrip(src);
+        AssertParseable(outp, "OCR INFINITE");
+        Assert.Contains("INFINITE", outp);
+    }
 }

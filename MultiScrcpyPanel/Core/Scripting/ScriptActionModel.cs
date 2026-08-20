@@ -244,6 +244,7 @@ public static class ScriptActionModel
         double dx = 0, dy = 0;
         bool center = false;
         bool stopOnFail = false;
+        bool infinite = false;
         string? clickText = null;
 
         for (int i = 1; i < parts.Length; i++)
@@ -283,6 +284,9 @@ public static class ScriptActionModel
                     stopOnFail = true;
                     i++;
                     break;
+                case "INFINITE":
+                    infinite = true;
+                    break;
                 default:
                     images.Add(parts[i]);
                     break;
@@ -294,7 +298,12 @@ public static class ScriptActionModel
             throw new FormatException("OCR 至少需要一张图片");
         }
 
-        return new OcrStep(images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail);
+        if (infinite && stopOnFail)
+        {
+            throw new FormatException("OCR 的 INFINITE 与 ONFAIL STOP 互斥（无限重试永不会“耗尽”，无需失败停止）");
+        }
+
+        return new OcrStep(images, maxErr, timeout, retry, wait, dx, dy, center, clickText, stopOnFail, infinite);
     }
 
     /// <summary>
@@ -342,6 +351,7 @@ public static class ScriptActionModel
         int wait = 300;
         double dx = 0, dy = 0;
         bool caseSensitive = false;
+        bool infinite = false;
 
         for (int i = 0; i < parts.Length; i++)
         {
@@ -371,12 +381,15 @@ public static class ScriptActionModel
                 case "CASE":
                     caseSensitive = true;
                     break;
+                case "INFINITE":
+                    infinite = true;
+                    break;
                 default:
                     throw new FormatException($"OCR_TEXT 未知参数：{parts[i]}");
             }
         }
 
-        return new OcrTextStep(text, anchor, dx, dy, maxErr, timeout, retry, wait, caseSensitive);
+        return new OcrTextStep(text, anchor, dx, dy, maxErr, timeout, retry, wait, caseSensitive, infinite);
     }
 
     private static (string Text, int RestStart) ExtractOcrTextBody(string line)
@@ -625,8 +638,10 @@ public sealed class OcrStep : ScriptStep
     public string? Text { get; set; }
     /// <summary>ONFAIL STOP：重试耗尽仍未命中时停止整个脚本（默认 false = 继续下一步）。</summary>
     public bool StopOnFail { get; set; }
+    /// <summary>INFINITE：无限重试，只有匹配成功才进入下一步。</summary>
+    public bool Infinite { get; set; }
 
-    public OcrStep(List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false)
+    public OcrStep(List<string> images, double maxError, int timeoutMs, int retry, int waitMs, double dx, double dy, bool useCenter, string? text = null, bool stopOnFail = false, bool infinite = false)
     {
         Images = images;
         MaxError = maxError;
@@ -638,6 +653,7 @@ public sealed class OcrStep : ScriptStep
         UseCenter = useCenter;
         Text = text;
         StopOnFail = stopOnFail;
+        Infinite = infinite;
     }
 
     public override ScriptStepKind Kind => ScriptStepKind.Ocr;
@@ -688,6 +704,11 @@ public sealed class OcrStep : ScriptStep
             p.Add("STOP");
         }
 
+        if (Infinite)
+        {
+            p.Add("INFINITE");
+        }
+
         if (!string.IsNullOrWhiteSpace(Text))
         {
             p.Add("TEXT");
@@ -705,7 +726,8 @@ public sealed class OcrStep : ScriptStep
             string txt = string.IsNullOrWhiteSpace(Text) ? "" : $" 文字[{Text}]";
             string mode = UseCenter ? "中心" : "随机";
             string stop = StopOnFail ? "  失败即停" : string.Empty;
-            return $"OCR 识别[{imgs}]{txt}  {mode}点击  容差{MaxError:P0}{stop}";
+            string inf = Infinite ? "  无限重试" : string.Empty;
+            return $"OCR 识别[{imgs}]{txt}  {mode}点击  容差{MaxError:P0}{stop}{inf}";
         }
     }
 }
@@ -728,9 +750,11 @@ public sealed class OcrTextStep : ScriptStep
     public int Retry { get; set; }
     public int WaitMs { get; set; }
     public bool CaseSensitive { get; set; }
+    /// <summary>INFINITE：无限重试，只有匹配成功才进入下一步。</summary>
+    public bool Infinite { get; set; }
 
     public OcrTextStep(string text, OcrTextAnchor anchor, double dx, double dy,
-        double maxError, int timeoutMs, int retry, int waitMs, bool caseSensitive)
+        double maxError, int timeoutMs, int retry, int waitMs, bool caseSensitive, bool infinite = false)
     {
         Text = text;
         Anchor = anchor;
@@ -741,6 +765,7 @@ public sealed class OcrTextStep : ScriptStep
         Retry = retry;
         WaitMs = waitMs;
         CaseSensitive = caseSensitive;
+        Infinite = infinite;
     }
 
     public override ScriptStepKind Kind => ScriptStepKind.OcrText;
@@ -791,6 +816,11 @@ public sealed class OcrTextStep : ScriptStep
             sb.Append(" CASE");
         }
 
+        if (Infinite)
+        {
+            sb.Append(" INFINITE");
+        }
+
         return sb.ToString();
     }
 
@@ -800,7 +830,8 @@ public sealed class OcrTextStep : ScriptStep
         {
             string t = Text.Length > 12 ? Text.Substring(0, 12) + "…" : Text;
             string a = Anchor != OcrTextAnchor.Center ? $" [{Anchor}]" : string.Empty;
-            return $"OCR 文字点击 \"{t}\"{a} 偏移({Fmt(Dx)},{Fmt(Dy)})";
+            string inf = Infinite ? "  无限重试" : string.Empty;
+            return $"OCR 文字点击 \"{t}\"{a} 偏移({Fmt(Dx)},{Fmt(Dy)}){inf}";
         }
     }
 }
