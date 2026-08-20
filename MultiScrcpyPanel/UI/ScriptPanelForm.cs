@@ -58,7 +58,7 @@ public sealed class ScriptPanelForm : Form
         BackColor = UiTheme.FormBackground;
         MinimumSize = new Size(420, 360);
         ClientSize = new Size(460, 460);
-        StartPosition = FormStartPosition.Manual; // 由主窗体以 CenterParent 定位
+        StartPosition = FormStartPosition.Manual; // 由主窗体以 MainForm.CenterChildOnMain 居中于主窗口
         KeyPreview = true;
 
         BuildUi();

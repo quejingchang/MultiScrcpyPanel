@@ -144,9 +144,10 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
-    /// 将子窗体定位到主窗口的正中心。覆盖 <see cref="Form.StartPosition"/>，
-    /// 通过 <see cref="Form.Load"/> 事件在子窗体尺寸（含 DPI 缩放）确定后再定位，
-    /// 保证任何子窗口被打开时都居中于主窗口，且不会出现闪跳。
+    /// 将子窗体定位到主窗口的正中心。在 <see cref="Form.Show"/> 之前同步计算并设置
+    /// <see cref="Form.Location"/>（不依赖 <see cref="Form.Load"/> 事件——该事件对 modeless
+    /// 窗体不可靠，且触发时取到的仍是 MinimumSize 强制前的错误尺寸）；并在 Load 时再校正一次
+    /// 以兼容 DPI 缩放差异。保证任何子窗口被打开时都居中于主窗口。
     /// </summary>
     public static void CenterChildOnMain(Form child)
     {
@@ -163,18 +164,32 @@ public sealed class MainForm : Form
         }
 
         child.StartPosition = FormStartPosition.Manual;
+        PlaceOnMain(child, main);
+
+        // 兜底：DPI 缩放 / MinimumSize 强制可能在 Load 后才最终确定尺寸，再校正一次。
         child.Load += (_, _) =>
         {
-            if (main.IsDisposed)
+            if (!main.IsDisposed)
             {
-                return;
+                PlaceOnMain(child, main);
             }
-
-            var b = main.Bounds;
-            child.Location = new Point(
-                b.X + (b.Width - child.Width) / 2,
-                b.Y + (b.Height - child.Height) / 2);
         };
+    }
+
+    /// <summary>按主窗口 Bounds 将 <paramref name="child"/> 放到正中心，使用其最终显示尺寸（含 MinimumSize 强制）。</summary>
+    private static void PlaceOnMain(Form child, Form main)
+    {
+        int w = Math.Max(child.Width, child.MinimumSize.Width);
+        int h = Math.Max(child.Height, child.MinimumSize.Height);
+        if (w != child.Width || h != child.Height)
+        {
+            child.Size = new Size(w, h);
+        }
+
+        var b = main.Bounds;
+        child.Location = new Point(
+            b.X + (b.Width - child.Width) / 2,
+            b.Y + (b.Height - child.Height) / 2);
     }
 
     /// <summary>写入状态栏文本。</summary>
